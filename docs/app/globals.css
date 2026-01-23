@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground: 255 255 255;
+  --background: 0 0 0;
+}
+
+body {
+  color: rgb(var(--foreground));
+  background: rgb(var(--background));
+}
+
+/* Code blocks */
+pre {
+  @apply bg-zinc-900 rounded-lg p-4 overflow-x-auto text-sm;
+}
+
+code {
+  @apply font-mono;
+}
+
+pre code {
+  @apply bg-transparent p-0;
+}
+
+:not(pre) > code {
+  @apply bg-zinc-800 px-1.5 py-0.5 rounded text-primary-400;
+}
+
+/* Syntax highlighting */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  @apply text-zinc-500;
+}
+
+.token.punctuation {
+  @apply text-zinc-400;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol {
+  @apply text-primary-400;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin {
+  @apply text-green-400;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.token.variable {
+  @apply text-orange-400;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  @apply text-blue-400;
+}
+
+.token.function,
+.token.class-name {
+  @apply text-yellow-400;
+}
+
+.token.regex,
+.token.important {
+  @apply text-orange-400;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-zinc-900;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-zinc-700 rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-zinc-600;
+}
+
+/* Selection */
+::selection {
+  @apply bg-primary-500/30;
+}
