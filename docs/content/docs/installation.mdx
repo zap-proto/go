@@ -34,7 +34,7 @@ The ZAP dependency is automatically resolved:
 
 ```go
 // Transitive dependency
-require zap.dev/go/zap/v3 v3.0.0
+require zap-protocol.github.io/go/zap/v3 v3.0.0
 ```
 
 ## ZAP Compiler (Optional)
@@ -56,7 +56,7 @@ apt-get install zap
 ### From Source
 
 ```bash
-curl -O https://zap.dev/zap-cpp-1.0.2.tar.gz
+curl -O https://github.com/zap-protocol/zap-cpp-core/releases/download/v-1.0.2.tar.gz
 tar zxf zap-cpp-1.0.2.tar.gz
 cd zap-cpp-1.0.2
 ./configure
@@ -69,7 +69,7 @@ sudo make install
 Install the Go code generator plugin:
 
 ```bash
-go install zap.dev/go/zap/v3/zapc-go@latest
+go install zap-protocol.github.io/go/zap/v3/zap-go-plugin@latest
 ```
 
 Ensure `$GOPATH/bin` is in your `PATH`.
@@ -80,7 +80,7 @@ If you modify `zap.zap`, regenerate the Go bindings:
 
 ```bash
 zap compile \
-  -I$GOPATH/src/zap.dev/go/zap/std \
+  -I$GOPATH/src/zap-protocol.github.io/go/zap/std \
   -ogo zap.zap
 ```
 
@@ -174,7 +174,7 @@ If you see import errors for ZAP standard library:
 export GOPATH=$HOME/go
 
 # Clone ZAP Go library
-go get zap.dev/go/zap/v3/...
+go get zap-protocol.github.io/go/zap/v3/...
 ```
 
 ### Version Conflicts
