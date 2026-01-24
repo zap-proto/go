@@ -1,0 +1,417 @@
+---
+title: Error Handling
+description: Error handling patterns and best practices in ZAP Go
+---
+
+# Error Handling
+
+ZAP Go follows Go's standard error handling conventions while providing clear, actionable error messages.
+
+## Error Categories
+
+ZAP errors fall into three categories:
+
+| Category | Description | Example |
+|----------|-------------|---------|
+| **Connection** | Network and transport errors | Connection refused, timeout |
+| **Protocol** | RPC and serialization errors | Invalid message, unknown method |
+| **Application** | Tool and resource errors | Tool not found, invalid arguments |
+
+## Connection Errors
+
+Connection errors occur during `Connect()` or when the underlying transport fails.
+
+```go
+client, err := zap.Connect("localhost:9999")
+if err != nil {
+    // Check for specific error types
+    var netErr net.Error
+    if errors.As(err, &netErr) {
+        if netErr.Timeout() {
+            log.Println("Connection timed out")
+        } else {
+            log.Printf("Network error: %v", netErr)
+        }
+        return
+    }
+
+    // Generic connection failure
+    log.Fatalf("Failed to connect: %v", err)
+}
+```
+
+### Handling Connection Loss
+
+```go
+func robustCall(ctx context.Context, addr string, tool string, args any) (*zap.ToolResultData, error) {
+    var client *zap.Client
+    var lastErr error
+
+    for attempt := 0; attempt < 3; attempt++ {
+        // Connect if needed
+        if client == nil {
+            var err error
+            client, err = zap.Connect(addr)
+            if err != nil {
+                lastErr = fmt.Errorf("connect attempt %d: %w", attempt+1, err)
+                time.Sleep(time.Second * time.Duration(attempt+1))
+                continue
+            }
+            defer client.Close()
+        }
+
+        // Make the call
+        result, err := client.CallTool(ctx, tool, args)
+        if err != nil {
+            // Check if connection was lost
+            if isConnectionError(err) {
+                client.Close()
+                client = nil
+                lastErr = fmt.Errorf("call attempt %d: %w", attempt+1, err)
+                continue
+            }
+            return nil, err
+        }
+
+        return result, nil
+    }
+
+    return nil, fmt.Errorf("failed after 3 attempts: %w", lastErr)
+}
+
+func isConnectionError(err error) bool {
+    // Check for common connection errors
+    if errors.Is(err, io.EOF) {
+        return true
+    }
+    if errors.Is(err, net.ErrClosed) {
+        return true
+    }
+    var netErr net.Error
+    if errors.As(err, &netErr) {
+        return true
+    }
+    return false
+}
+```
+
+## Protocol Errors
+
+Protocol errors indicate issues with the RPC layer or message serialization.
+
+```go
+result, err := client.CallTool(ctx, "search", args)
+if err != nil {
+    // Check for context errors
+    if errors.Is(err, context.DeadlineExceeded) {
+        log.Println("Request timed out")
+        return
+    }
+    if errors.Is(err, context.Canceled) {
+        log.Println("Request was canceled")
+        return
+    }
+
+    // RPC errors
+    log.Printf("RPC error: %v", err)
+    return
+}
+```
+
+### Timeout Handling
+
+```go
+// Set a request timeout
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+result, err := client.CallTool(ctx, "slow-tool", args)
+if err != nil {
+    if ctx.Err() == context.DeadlineExceeded {
+        // Handle timeout specifically
+        log.Println("Operation timed out after 10 seconds")
+        return nil, ErrTimeout
+    }
+    return nil, err
+}
+```
+
+## Application Errors
+
+Application errors are returned by tools, resources, or prompts. These are not Go errors - they're encoded in the result.
+
+### Tool Errors
+
+```go
+result, err := client.CallTool(ctx, "search", args)
+if err != nil {
+    // This is an RPC error
+    return nil, fmt.Errorf("rpc error: %w", err)
+}
+
+// Check for tool-level errors
+if result.Error != "" {
+    // This is a tool error
+    return nil, fmt.Errorf("tool error: %s", result.Error)
+}
+
+// Success - process result.Content
+```
+
+### Structured Error Responses
+
+Tools can return structured error information:
+
+```go
+type ToolError struct {
+    Code    string `json:"code"`
+    Message string `json:"message"`
+    Details any    `json:"details,omitempty"`
+}
+
+func parseToolError(result *zap.ToolResultData) (*ToolError, error) {
+    if result.Error == "" {
+        return nil, nil
+    }
+
+    // Try to parse as structured error
+    var toolErr ToolError
+    if err := json.Unmarshal([]byte(result.Error), &toolErr); err != nil {
+        // Plain text error
+        return &ToolError{
+            Code:    "UNKNOWN",
+            Message: result.Error,
+        }, nil
+    }
+
+    return &toolErr, nil
+}
+```
+
+### Common Error Codes
+
+```go
+const (
+    ErrCodeToolNotFound     = "TOOL_NOT_FOUND"
+    ErrCodeInvalidArguments = "INVALID_ARGUMENTS"
+    ErrCodeRateLimited      = "RATE_LIMITED"
+    ErrCodeInternalError    = "INTERNAL_ERROR"
+    ErrCodeUnauthorized     = "UNAUTHORIZED"
+    ErrCodeNotImplemented   = "NOT_IMPLEMENTED"
+)
+
+func handleToolError(result *zap.ToolResultData) error {
+    toolErr, _ := parseToolError(result)
+    if toolErr == nil {
+        return nil
+    }
+
+    switch toolErr.Code {
+    case ErrCodeToolNotFound:
+        return fmt.Errorf("tool not found: %s", toolErr.Message)
+    case ErrCodeInvalidArguments:
+        return fmt.Errorf("invalid arguments: %s", toolErr.Message)
+    case ErrCodeRateLimited:
+        return &RateLimitError{Message: toolErr.Message}
+    case ErrCodeUnauthorized:
+        return &AuthError{Message: toolErr.Message}
+    default:
+        return fmt.Errorf("tool error [%s]: %s", toolErr.Code, toolErr.Message)
+    }
+}
+```
+
+## Custom Error Types
+
+Define custom error types for better handling:
+
+```go
+// RateLimitError indicates the client should back off
+type RateLimitError struct {
+    Message    string
+    RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+    return fmt.Sprintf("rate limited: %s (retry after %v)", e.Message, e.RetryAfter)
+}
+
+// AuthError indicates authentication failed
+type AuthError struct {
+    Message string
+}
+
+func (e *AuthError) Error() string {
+    return fmt.Sprintf("authentication error: %s", e.Message)
+}
+
+// Usage
+func callWithRetry(ctx context.Context, client *zap.Client, tool string, args any) (*zap.ToolResultData, error) {
+    for attempt := 0; attempt < 5; attempt++ {
+        result, err := client.CallTool(ctx, tool, args)
+        if err != nil {
+            return nil, err
+        }
+
+        toolErr := handleToolError(result)
+        if toolErr == nil {
+            return result, nil
+        }
+
+        var rateLimitErr *RateLimitError
+        if errors.As(toolErr, &rateLimitErr) {
+            log.Printf("Rate limited, waiting %v", rateLimitErr.RetryAfter)
+            time.Sleep(rateLimitErr.RetryAfter)
+            continue
+        }
+
+        return nil, toolErr
+    }
+
+    return nil, fmt.Errorf("max retries exceeded")
+}
+```
+
+## Logging Errors
+
+Send errors to the server for debugging:
+
+```go
+func logError(ctx context.Context, client *zap.Client, operation string, err error) {
+    client.Log(ctx, zap.LogLevelError, "Operation failed", map[string]any{
+        "operation": operation,
+        "error":     err.Error(),
+        "stack":     string(debug.Stack()),
+    })
+}
+```
+
+## Error Wrapping
+
+Use error wrapping to preserve context:
+
+```go
+func processDocument(ctx context.Context, client *zap.Client, docURI string) error {
+    // Read the document
+    content, err := client.ReadResource(ctx, docURI)
+    if err != nil {
+        return fmt.Errorf("reading document %s: %w", docURI, err)
+    }
+
+    // Process with a tool
+    result, err := client.CallTool(ctx, "analyze", map[string]any{
+        "content": content.Text,
+    })
+    if err != nil {
+        return fmt.Errorf("analyzing document: %w", err)
+    }
+
+    if result.Error != "" {
+        return fmt.Errorf("analysis failed: %s", result.Error)
+    }
+
+    return nil
+}
+
+// Usage
+err := processDocument(ctx, client, "file:///doc.txt")
+if err != nil {
+    // Error chain preserved: "reading document file:///doc.txt: connection refused"
+    log.Printf("Failed: %v", err)
+
+    // Check for specific errors
+    if errors.Is(err, context.DeadlineExceeded) {
+        log.Println("Operation timed out")
+    }
+}
+```
+
+## Error Recovery Patterns
+
+### Graceful Degradation
+
+```go
+func searchWithFallback(ctx context.Context, client *zap.Client, query string) ([]string, error) {
+    // Try primary search
+    result, err := client.CallTool(ctx, "primary-search", map[string]any{"query": query})
+    if err == nil && result.Error == "" {
+        return parseSearchResults(result.Content)
+    }
+
+    log.Printf("Primary search failed, trying fallback: %v", err)
+
+    // Fallback to secondary
+    result, err = client.CallTool(ctx, "fallback-search", map[string]any{"query": query})
+    if err == nil && result.Error == "" {
+        return parseSearchResults(result.Content)
+    }
+
+    // Return cached results or empty
+    return getCachedResults(query), nil
+}
+```
+
+### Circuit Breaker
+
+```go
+type CircuitBreaker struct {
+    failures    int
+    lastFailure time.Time
+    threshold   int
+    resetAfter  time.Duration
+    mu          sync.Mutex
+}
+
+func (cb *CircuitBreaker) Execute(fn func() error) error {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+
+    // Check if circuit is open
+    if cb.failures >= cb.threshold {
+        if time.Since(cb.lastFailure) < cb.resetAfter {
+            return fmt.Errorf("circuit breaker open")
+        }
+        // Reset after timeout
+        cb.failures = 0
+    }
+
+    // Execute
+    err := fn()
+    if err != nil {
+        cb.failures++
+        cb.lastFailure = time.Now()
+        return err
+    }
+
+    // Success - reset failures
+    cb.failures = 0
+    return nil
+}
+
+// Usage
+breaker := &CircuitBreaker{
+    threshold:  5,
+    resetAfter: 30 * time.Second,
+}
+
+err := breaker.Execute(func() error {
+    result, err := client.CallTool(ctx, "unreliable-tool", args)
+    if err != nil {
+        return err
+    }
+    if result.Error != "" {
+        return fmt.Errorf("tool error: %s", result.Error)
+    }
+    return nil
+})
+```
+
+## Best Practices
+
+1. **Always check both error return and result.Error**
+2. **Use context for timeout control**
+3. **Wrap errors with context using `fmt.Errorf` and `%w`**
+4. **Define custom error types for handling-specific errors**
+5. **Log errors with structured data for debugging**
+6. **Implement retry logic with exponential backoff**
+7. **Use circuit breakers for unreliable services**

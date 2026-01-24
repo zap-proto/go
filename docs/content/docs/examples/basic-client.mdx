@@ -1,0 +1,418 @@
+---
+title: Basic Client
+description: Complete example of a ZAP client connecting to a server
+---
+
+# Basic Client Example
+
+This example demonstrates a complete ZAP client that connects to a server, discovers available tools, and executes them.
+
+## Complete Code
+
+```go
+// main.go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "log"
+    "os"
+    "time"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Parse command line flags
+    addr := flag.String("addr", "localhost:9999", "ZAP server address")
+    timeout := flag.Duration("timeout", 30*time.Second, "Request timeout")
+    flag.Parse()
+
+    // Set up logging
+    log.SetFlags(log.Ltime | log.Lmicroseconds)
+    log.Printf("Connecting to ZAP server at %s", *addr)
+
+    // Create context with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+    defer cancel()
+
+    // Connect to the server
+    client, err := zap.Connect(*addr)
+    if err != nil {
+        log.Fatalf("Connection failed: %v", err)
+    }
+    defer func() {
+        log.Println("Closing connection")
+        client.Close()
+    }()
+
+    // Initialize the connection
+    log.Println("Initializing connection...")
+    serverInfo, err := client.Init(ctx, "example-client", "1.0.0")
+    if err != nil {
+        log.Fatalf("Initialization failed: %v", err)
+    }
+
+    printServerInfo(serverInfo)
+
+    // Explore and use server capabilities
+    if serverInfo.Capabilities.Tools {
+        if err := exploreTools(ctx, client); err != nil {
+            log.Printf("Tool exploration failed: %v", err)
+        }
+    }
+
+    if serverInfo.Capabilities.Resources {
+        if err := exploreResources(ctx, client); err != nil {
+            log.Printf("Resource exploration failed: %v", err)
+        }
+    }
+
+    if serverInfo.Capabilities.Prompts {
+        if err := explorePrompts(ctx, client); err != nil {
+            log.Printf("Prompt exploration failed: %v", err)
+        }
+    }
+
+    // Send a final log message
+    if serverInfo.Capabilities.Logging {
+        client.Log(ctx, zap.LogLevelInfo, "Client session completed", map[string]any{
+            "client":   "example-client",
+            "duration": time.Since(time.Now()).String(),
+        })
+    }
+
+    log.Println("Done!")
+}
+
+func printServerInfo(info *zap.ServerInfoData) {
+    fmt.Println("\n=== Server Information ===")
+    fmt.Printf("Name:    %s\n", info.Name)
+    fmt.Printf("Version: %s\n", info.Version)
+    fmt.Println("\nCapabilities:")
+    fmt.Printf("  Tools:     %v\n", info.Capabilities.Tools)
+    fmt.Printf("  Resources: %v\n", info.Capabilities.Resources)
+    fmt.Printf("  Prompts:   %v\n", info.Capabilities.Prompts)
+    fmt.Printf("  Logging:   %v\n", info.Capabilities.Logging)
+}
+
+func exploreTools(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n=== Tools ===")
+
+    // List available tools
+    tools, err := client.ListTools(ctx)
+    if err != nil {
+        return fmt.Errorf("listing tools: %w", err)
+    }
+
+    if len(tools) == 0 {
+        fmt.Println("No tools available")
+        return nil
+    }
+
+    // Print tool information
+    for i, tool := range tools {
+        fmt.Printf("\n[%d] %s\n", i+1, tool.Name)
+        fmt.Printf("    Description: %s\n", tool.Description)
+
+        if tool.Schema != nil {
+            // Pretty print the schema
+            var schema map[string]any
+            if err := json.Unmarshal(tool.Schema, &schema); err == nil {
+                if props, ok := schema["properties"].(map[string]any); ok {
+                    fmt.Println("    Parameters:")
+                    for name, prop := range props {
+                        if propMap, ok := prop.(map[string]any); ok {
+                            propType, _ := propMap["type"].(string)
+                            propDesc, _ := propMap["description"].(string)
+                            fmt.Printf("      - %s (%s): %s\n", name, propType, propDesc)
+                        }
+                    }
+                }
+            }
+        }
+
+        if len(tool.Annotations) > 0 {
+            fmt.Println("    Annotations:")
+            for k, v := range tool.Annotations {
+                fmt.Printf("      %s: %s\n", k, v)
+            }
+        }
+    }
+
+    // Call the first tool as an example
+    if len(tools) > 0 {
+        tool := tools[0]
+        fmt.Printf("\n--- Calling tool: %s ---\n", tool.Name)
+
+        // Build example arguments (this would be customized per tool)
+        args := map[string]any{
+            "input": "Hello, World!",
+        }
+
+        result, err := client.CallTool(ctx, tool.Name, args)
+        if err != nil {
+            return fmt.Errorf("calling tool %s: %w", tool.Name, err)
+        }
+
+        fmt.Printf("Result ID: %s\n", result.ID)
+
+        if result.Error != "" {
+            fmt.Printf("Error: %s\n", result.Error)
+        } else {
+            // Pretty print the result
+            var prettyResult any
+            if err := json.Unmarshal(result.Content, &prettyResult); err == nil {
+                formatted, _ := json.MarshalIndent(prettyResult, "", "  ")
+                fmt.Printf("Content:\n%s\n", string(formatted))
+            } else {
+                fmt.Printf("Content: %s\n", string(result.Content))
+            }
+        }
+
+        if len(result.Metadata) > 0 {
+            fmt.Println("Metadata:")
+            for k, v := range result.Metadata {
+                fmt.Printf("  %s: %s\n", k, v)
+            }
+        }
+    }
+
+    return nil
+}
+
+func exploreResources(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n=== Resources ===")
+
+    // List available resources
+    resources, err := client.ListResources(ctx)
+    if err != nil {
+        return fmt.Errorf("listing resources: %w", err)
+    }
+
+    if len(resources) == 0 {
+        fmt.Println("No resources available")
+        return nil
+    }
+
+    // Print resource information
+    for i, res := range resources {
+        fmt.Printf("\n[%d] %s\n", i+1, res.Name)
+        fmt.Printf("    URI:         %s\n", res.URI)
+        fmt.Printf("    MIME Type:   %s\n", res.MimeType)
+        fmt.Printf("    Description: %s\n", res.Description)
+
+        if len(res.Annotations) > 0 {
+            fmt.Println("    Annotations:")
+            for k, v := range res.Annotations {
+                fmt.Printf("      %s: %s\n", k, v)
+            }
+        }
+    }
+
+    // Read the first resource
+    if len(resources) > 0 {
+        res := resources[0]
+        fmt.Printf("\n--- Reading resource: %s ---\n", res.URI)
+
+        content, err := client.ReadResource(ctx, res.URI)
+        if err != nil {
+            return fmt.Errorf("reading resource %s: %w", res.URI, err)
+        }
+
+        fmt.Printf("URI:       %s\n", content.URI)
+        fmt.Printf("MIME Type: %s\n", content.MimeType)
+
+        if content.Text != "" {
+            // Truncate long text
+            text := content.Text
+            if len(text) > 500 {
+                text = text[:500] + "... (truncated)"
+            }
+            fmt.Printf("Content:\n%s\n", text)
+        } else if content.Blob != nil {
+            fmt.Printf("Binary content: %d bytes\n", len(content.Blob))
+
+            // Optionally save to file
+            filename := fmt.Sprintf("resource_%d.bin", time.Now().Unix())
+            if err := os.WriteFile(filename, content.Blob, 0644); err == nil {
+                fmt.Printf("Saved to: %s\n", filename)
+            }
+        }
+    }
+
+    return nil
+}
+
+func explorePrompts(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n=== Prompts ===")
+
+    // List available prompts
+    prompts, err := client.ListPrompts(ctx)
+    if err != nil {
+        return fmt.Errorf("listing prompts: %w", err)
+    }
+
+    if len(prompts) == 0 {
+        fmt.Println("No prompts available")
+        return nil
+    }
+
+    // Print prompt information
+    for i, prompt := range prompts {
+        fmt.Printf("\n[%d] %s\n", i+1, prompt.Name)
+        fmt.Printf("    Description: %s\n", prompt.Description)
+
+        if len(prompt.Arguments) > 0 {
+            fmt.Println("    Arguments:")
+            for _, arg := range prompt.Arguments {
+                required := ""
+                if arg.Required {
+                    required = " (required)"
+                }
+                fmt.Printf("      - %s: %s%s\n", arg.Name, arg.Description, required)
+            }
+        }
+    }
+
+    // Get the first prompt with example arguments
+    if len(prompts) > 0 {
+        prompt := prompts[0]
+        fmt.Printf("\n--- Getting prompt: %s ---\n", prompt.Name)
+
+        // Build example arguments
+        args := make(map[string]string)
+        for _, arg := range prompt.Arguments {
+            args[arg.Name] = fmt.Sprintf("example-%s", arg.Name)
+        }
+
+        messages, err := client.GetPrompt(ctx, prompt.Name, args)
+        if err != nil {
+            return fmt.Errorf("getting prompt %s: %w", prompt.Name, err)
+        }
+
+        fmt.Println("Messages:")
+        for i, msg := range messages {
+            fmt.Printf("\n  [%d] Role: %s\n", i+1, msg.Role)
+
+            if msg.Content.Text != "" {
+                text := msg.Content.Text
+                if len(text) > 200 {
+                    text = text[:200] + "..."
+                }
+                fmt.Printf("      Text: %s\n", text)
+            }
+
+            if msg.Content.Image != nil {
+                fmt.Printf("      Image: %s (%d bytes)\n",
+                    msg.Content.Image.MimeType,
+                    len(msg.Content.Image.Data))
+            }
+
+            if msg.Content.Resource != nil {
+                fmt.Printf("      Resource: %s\n", msg.Content.Resource.URI)
+            }
+        }
+    }
+
+    return nil
+}
+```
+
+## Running the Example
+
+1. Save the code as `main.go`
+
+2. Initialize a Go module:
+```bash
+go mod init example
+go get github.com/zap-protocol/zap-go
+```
+
+3. Run with default settings:
+```bash
+go run main.go
+```
+
+4. Or specify a different server:
+```bash
+go run main.go -addr=192.168.1.100:9999 -timeout=60s
+```
+
+## Expected Output
+
+```
+14:30:15.123456 Connecting to ZAP server at localhost:9999
+14:30:15.125678 Initializing connection...
+
+=== Server Information ===
+Name:    example-server
+Version: 1.0.0
+
+Capabilities:
+  Tools:     true
+  Resources: true
+  Prompts:   true
+  Logging:   true
+
+=== Tools ===
+
+[1] search
+    Description: Search the web for information
+    Parameters:
+      - query (string): Search query text
+      - limit (integer): Maximum results to return
+
+--- Calling tool: search ---
+Result ID: call-abc123
+Content:
+{
+  "results": [
+    {"title": "Example Result", "url": "https://example.com"}
+  ]
+}
+
+=== Resources ===
+
+[1] config
+    URI:         file:///config.json
+    MIME Type:   application/json
+    Description: Application configuration
+
+--- Reading resource: file:///config.json ---
+URI:       file:///config.json
+MIME Type: application/json
+Content:
+{"debug":true,"port":9999}
+
+=== Prompts ===
+
+[1] greeting
+    Description: Generate a greeting message
+    Arguments:
+      - name: Name to greet (required)
+
+--- Getting prompt: greeting ---
+Messages:
+
+  [1] Role: system
+      Text: You are a friendly assistant.
+
+  [2] Role: user
+      Text: Please greet example-name warmly.
+
+14:30:15.234567 Closing connection
+14:30:15.235678 Done!
+```
+
+## Key Concepts Demonstrated
+
+1. **Connection management** - Connect with proper cleanup
+2. **Context usage** - Timeout control
+3. **Capability checking** - Check before using features
+4. **Error handling** - Explicit error checking
+5. **Logging** - Send logs to server
+6. **Pretty printing** - Format JSON output

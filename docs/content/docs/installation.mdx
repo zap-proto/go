@@ -1,0 +1,191 @@
+---
+title: Installation
+description: Install ZAP Go and set up your development environment
+---
+
+# Installation
+
+ZAP Go requires Go 1.21 or later and the ZAP compiler for schema regeneration.
+
+## Installing the Package
+
+Install ZAP Go using `go get`:
+
+```bash
+go get github.com/zap-protocol/zap-go
+```
+
+This will download the package and add it to your `go.mod` file.
+
+## Dependencies
+
+ZAP Go depends on the ZAP Go library:
+
+```go
+// go.mod
+module your-project
+
+go 1.21
+
+require github.com/zap-protocol/zap-go v0.1.0
+```
+
+The ZAP dependency is automatically resolved:
+
+```go
+// Transitive dependency
+require capnproto.org/go/capnp/v3 v3.0.0
+```
+
+## ZAP Compiler (Optional)
+
+If you need to regenerate the Go bindings from the schema or modify the protocol, install the ZAP compiler:
+
+### macOS
+
+```bash
+brew install capnp
+```
+
+### Ubuntu/Debian
+
+```bash
+apt-get install capnproto
+```
+
+### From Source
+
+```bash
+curl -O https://capnproto.org/capnproto-c++-1.0.2.tar.gz
+tar zxf capnproto-c++-1.0.2.tar.gz
+cd capnproto-c++-1.0.2
+./configure
+make -j6
+sudo make install
+```
+
+### Go Code Generator
+
+Install the Go code generator plugin:
+
+```bash
+go install capnproto.org/go/capnp/v3/capnpc-go@latest
+```
+
+Ensure `$GOPATH/bin` is in your `PATH`.
+
+## Regenerating from Schema
+
+If you modify `zap.capnp`, regenerate the Go bindings:
+
+```bash
+capnp compile \
+  -I$GOPATH/src/capnproto.org/go/capnp/std \
+  -ogo zap.capnp
+```
+
+This produces `zap.capnp.go` with all type definitions and RPC interfaces.
+
+## Verifying Installation
+
+Create a simple test program to verify the installation:
+
+```go
+package main
+
+import (
+    "fmt"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Verify types are available
+    tool := zap.ToolData{
+        Name:        "test",
+        Description: "A test tool",
+    }
+    fmt.Printf("Tool: %s\n", tool.Name)
+}
+```
+
+Run with:
+
+```bash
+go run main.go
+```
+
+Expected output:
+
+```
+Tool: test
+```
+
+## Development Setup
+
+For development, clone the repository:
+
+```bash
+git clone https://github.com/zap-protocol/zap-go.git
+cd zap-go
+```
+
+Run tests:
+
+```bash
+go test -v ./...
+```
+
+## IDE Configuration
+
+### VS Code
+
+Install the Go extension and configure your workspace:
+
+```json
+{
+  "go.useLanguageServer": true,
+  "gopls": {
+    "formatting.gofumpt": true
+  }
+}
+```
+
+### GoLand
+
+GoLand automatically recognizes Go modules. Ensure the project SDK is set to Go 1.21+.
+
+## Troubleshooting
+
+### "package not found" Error
+
+Ensure your `GOPROXY` is configured:
+
+```bash
+go env -w GOPROXY=https://proxy.golang.org,direct
+```
+
+### ZAP Import Errors
+
+If you see import errors for ZAP standard library:
+
+```bash
+# Set GOPATH if not already set
+export GOPATH=$HOME/go
+
+# Clone ZAP Go library
+go get capnproto.org/go/capnp/v3/...
+```
+
+### Version Conflicts
+
+If you have dependency conflicts, use `go mod tidy`:
+
+```bash
+go mod tidy
+```
+
+## Next Steps
+
+- [Quick Start](/docs/quickstart) - Build your first ZAP application
+- [Client API](/docs/client) - Learn the client interface

@@ -1,0 +1,454 @@
+---
+title: Agent Consensus
+description: Distributed voting and threshold signing for AI agent coordination
+---
+
+# Agent Consensus
+
+ZAP Go provides two consensus mechanisms for distributed AI agent coordination:
+
+1. **Agent Voting** - Simple majority voting for response aggregation
+2. **Ringtail Threshold Signatures** - Post-quantum threshold signing for critical operations
+
+## Agent Voting Consensus
+
+Agent voting enables multiple AI agents to reach consensus on a response through a simple voting mechanism.
+
+### Overview
+
+The voting process:
+
+1. A query is submitted to the consensus service
+2. Multiple agents submit their responses
+3. Agents vote on which response is best
+4. When a threshold is reached, consensus is achieved
+
+### Schema Types
+
+```capnp
+struct AgentQueryId {
+  hash @0 :Data;  # BLAKE3 hash of query content
+}
+
+struct AgentQueryState {
+  queryId @0 :AgentQueryId;
+  query @1 :Text;
+  responses @2 :List(AgentResponseEntry);
+  votes @3 :List(AgentResponseVote);
+  finalized @4 :Bool;
+  result @5 :Text;
+  createdAt @6 :Timestamp;
+}
+
+struct AgentConsensusConfig {
+  threshold @0 :Float64;      # Required vote fraction (0.0-1.0)
+  minResponses @1 :UInt32;    # Minimum responses before consensus check
+  timeoutSecs @2 :UInt32;     # Query timeout in seconds
+  requireSignatures @3 :Bool; # Whether agent signatures are required
+}
+```
+
+### Usage
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    client, err := zap.ConnectConsensus("localhost:9999")
+    if err != nil {
+        log.Fatalf("Failed to connect: %v", err)
+    }
+    defer client.Close()
+
+    ctx := context.Background()
+
+    // Submit a query for consensus
+    config := zap.AgentConsensusConfig{
+        Threshold:         0.66,  // 66% agreement required
+        MinResponses:      3,     // At least 3 responses needed
+        TimeoutSecs:       60,    // 1 minute timeout
+        RequireSignatures: true,  // Agents must sign responses
+    }
+
+    queryID, err := client.SubmitQuery(ctx, "What is the capital of France?", config)
+    if err != nil {
+        log.Fatalf("Failed to submit query: %v", err)
+    }
+
+    log.Printf("Query submitted: %x", queryID.Hash)
+}
+```
+
+### Submitting Responses
+
+Agents submit their responses independently:
+
+```go
+func submitAgentResponse(ctx context.Context, client *zap.ConsensusClient, queryID zap.AgentQueryId) error {
+    // Generate response
+    response := "The capital of France is Paris."
+
+    // Sign the response (if signatures required)
+    signature, err := signResponse(response)
+    if err != nil {
+        return err
+    }
+
+    result, err := client.SubmitResponse(ctx, zap.AgentSubmitResponseRequest{
+        QueryID:    queryID,
+        AgentID:    "agent-1",
+        Response:   response,
+        Signature:  signature,
+        Confidence: 0.95,
+    })
+    if err != nil {
+        return err
+    }
+
+    switch result.Type {
+    case zap.ResponseResultSuccess:
+        log.Println("Response submitted successfully")
+    case zap.ResponseResultDuplicate:
+        log.Println("Agent already submitted a response")
+    case zap.ResponseResultError:
+        log.Printf("Error: %s", result.Error)
+    }
+
+    return nil
+}
+```
+
+### Checking Consensus
+
+Poll for consensus or wait for notification:
+
+```go
+func waitForConsensus(ctx context.Context, client *zap.ConsensusClient, queryID zap.AgentQueryId) (string, error) {
+    for {
+        result, err := client.TryConsensus(ctx, queryID)
+        if err != nil {
+            return "", err
+        }
+
+        switch result.Type {
+        case zap.ConsensusResultReached:
+            return result.Result, nil
+
+        case zap.ConsensusPending:
+            log.Printf("Pending: %d responses, waiting for more",
+                len(result.State.Responses))
+            time.Sleep(time.Second)
+
+        case zap.ConsensusNoAgreement:
+            return "", fmt.Errorf("no consensus reached after %d responses",
+                len(result.State.Responses))
+
+        case zap.ConsensusError:
+            return "", fmt.Errorf("consensus error: %s", result.Error)
+        }
+    }
+}
+```
+
+### Query State
+
+Monitor the full state of a query:
+
+```go
+state, err := client.GetQuery(ctx, queryID)
+if err != nil {
+    log.Fatalf("Failed to get query: %v", err)
+}
+
+log.Printf("Query: %s", state.Query)
+log.Printf("Finalized: %v", state.Finalized)
+
+for _, response := range state.Responses {
+    log.Printf("Agent %s: %s (confidence: %.2f)",
+        response.AgentID, response.Response, response.Confidence)
+}
+
+for _, vote := range state.Votes {
+    log.Printf("Response %x: %d votes from %v",
+        vote.ResponseHash, vote.VoteCount, vote.Voters)
+}
+```
+
+## Ringtail Threshold Signatures
+
+Ringtail is a post-quantum threshold signature scheme based on lattice cryptography. It enables t-of-n signing where any t parties can produce a valid signature.
+
+### Overview
+
+Ringtail provides:
+
+- **Post-quantum security** - Based on Module-LWE hardness
+- **Threshold signing** - t-of-n parties required
+- **Two-round protocol** - Efficient interactive signing
+
+### Protocol Flow
+
+```
+Round 1: Each party generates commitment D_i and MACs
+         Parties broadcast Round1Output to all others
+
+Round 2: Each party verifies MACs and generates response z_i
+         Parties broadcast Round2Output to combiner
+
+Combine: Combiner aggregates responses into final signature
+```
+
+### Schema Types
+
+```capnp
+struct RingtailParams {
+  m @0 :UInt16 = 8;                # Matrix rows
+  n @1 :UInt16 = 7;                # Matrix columns
+  dbar @2 :UInt16 = 48;            # Commitment dimension
+  kappa @3 :UInt16 = 23;           # Challenge weight
+  phi @4 :UInt16 = 256;            # Ring dimension
+  keySize @5 :UInt16 = 32;         # Key size in bytes
+  q @6 :UInt64 = 0x1000000004A01;  # 48-bit prime modulus
+}
+
+struct RingtailSignature {
+  c @0 :Poly;             # Challenge polynomial
+  z @1 :PolyVector;       # Aggregated response
+  delta @2 :PolyVector;   # Correction term
+  signers @3 :List(UInt32);
+  sessionId @4 :UInt64;
+}
+```
+
+### Party Setup
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Connect as a signing party
+    party, err := zap.ConnectRingtailParty("localhost:9999")
+    if err != nil {
+        log.Fatalf("Failed to connect: %v", err)
+    }
+    defer party.Close()
+
+    ctx := context.Background()
+
+    // Get party info
+    info, err := party.GetInfo(ctx)
+    if err != nil {
+        log.Fatalf("Failed to get info: %v", err)
+    }
+
+    log.Printf("Party ID: %d", info.PartyID)
+    log.Printf("Total parties: %d", info.TotalParties)
+    log.Printf("Threshold: %d", info.Threshold)
+}
+```
+
+### Threshold Signing
+
+```go
+func thresholdSign(ctx context.Context, parties []*zap.RingtailParty, message []byte) (*zap.RingtailSignature, error) {
+    // Create signing request
+    request := zap.RingtailSignRequest{
+        Message:      message,
+        SessionID:    generateSessionID(),
+        Participants: []uint32{0, 1, 2}, // t parties
+        TimeoutMs:    30000,
+    }
+
+    // Round 1: Collect commitments from all parties
+    var round1Outputs []zap.RingtailRound1Output
+    for _, party := range parties {
+        output, err := party.SignRound1(ctx, request)
+        if err != nil {
+            return nil, fmt.Errorf("round 1 failed for party %d: %w", party.ID, err)
+        }
+        round1Outputs = append(round1Outputs, output)
+    }
+
+    // Round 2: Generate responses
+    var round2Outputs []zap.RingtailRound2Output
+    for _, party := range parties {
+        output, err := party.SignRound2(ctx, request, round1Outputs)
+        if err != nil {
+            return nil, fmt.Errorf("round 2 failed for party %d: %w", party.ID, err)
+        }
+        round2Outputs = append(round2Outputs, output)
+    }
+
+    // Finalize: Combine into signature
+    response, err := parties[0].Finalize(ctx, request, round2Outputs)
+    if err != nil {
+        return nil, fmt.Errorf("finalize failed: %w", err)
+    }
+
+    if response.Error != "" {
+        return nil, fmt.Errorf("signing error: %s", response.Error)
+    }
+
+    return &response.Signature, nil
+}
+```
+
+### Verification
+
+```go
+func verifySignature(ctx context.Context, party *zap.RingtailParty, message []byte, sig *zap.RingtailSignature, publicKey zap.PolyVector, publicMatrix zap.PolyMatrix) (bool, error) {
+    request := zap.RingtailVerifyRequest{
+        Message:      message,
+        Signature:    *sig,
+        PublicKey:    publicKey,
+        PublicMatrix: publicMatrix,
+    }
+
+    response, err := party.Verify(ctx, request)
+    if err != nil {
+        return false, err
+    }
+
+    if response.Error != "" {
+        return false, fmt.Errorf("verification error: %s", response.Error)
+    }
+
+    return response.Valid, nil
+}
+```
+
+### Coordinator Pattern
+
+Use a coordinator for managing signing sessions:
+
+```go
+func coordinatedSign(ctx context.Context, coord *zap.RingtailCoordinator, message []byte, participants []uint32) (*zap.RingtailSignature, error) {
+    // Initialize session
+    sessionID, err := coord.InitSession(ctx, message, participants)
+    if err != nil {
+        return nil, fmt.Errorf("init session failed: %w", err)
+    }
+
+    // Wait for round 1 outputs
+    round1Outputs, err := coord.CollectRound1(ctx, sessionID)
+    if err != nil {
+        return nil, fmt.Errorf("collect round 1 failed: %w", err)
+    }
+
+    // Wait for round 2 outputs
+    round2Outputs, err := coord.CollectRound2(ctx, sessionID)
+    if err != nil {
+        return nil, fmt.Errorf("collect round 2 failed: %w", err)
+    }
+
+    // Get final signature
+    response, err := coord.GetSignature(ctx, sessionID)
+    if err != nil {
+        return nil, fmt.Errorf("get signature failed: %w", err)
+    }
+
+    return &response.Signature, nil
+}
+```
+
+### Party Status
+
+Monitor party health:
+
+```go
+type RingtailPartyStatus int
+
+const (
+    RingtailPartyIdle RingtailPartyStatus = iota
+    RingtailPartySigningRound1
+    RingtailPartySigningRound2
+    RingtailPartyCombining
+    RingtailPartyBusy
+    RingtailPartyOffline
+)
+```
+
+### Peer-to-Peer Messages
+
+For direct party communication:
+
+```go
+type RingtailPeerMessage struct {
+    From      uint32
+    To        uint32  // 0 = broadcast
+    SessionID uint64
+    Timestamp time.Time
+
+    // One of:
+    Round1      *RingtailRound1Output
+    Round2      *RingtailRound2Output
+    SignRequest *RingtailSignRequest
+    SignResponse *RingtailSignResponse
+    Heartbeat   *RingtailHeartbeat
+    Abort       *RingtailAbort
+}
+```
+
+## Use Cases
+
+### Multi-Agent Decisions
+
+Use voting consensus for non-critical decisions:
+
+```go
+// Ask multiple agents for a recommendation
+queryID, _ := client.SubmitQuery(ctx,
+    "Should we scale up the service?",
+    zap.AgentConsensusConfig{
+        Threshold:    0.75,
+        MinResponses: 5,
+    },
+)
+
+// Agents analyze metrics and vote
+// Consensus determines action
+```
+
+### Critical Operations
+
+Use Ringtail for operations requiring strong guarantees:
+
+```go
+// Sign a critical transaction
+signature, err := thresholdSign(ctx, parties, transactionData)
+if err != nil {
+    log.Fatalf("Signing failed: %v", err)
+}
+
+// Only possible with t-of-n parties agreeing
+submitTransaction(transactionData, signature)
+```
+
+### Hybrid Approach
+
+Combine both mechanisms:
+
+```go
+// First: Voting consensus on what to do
+decision, _ := waitForConsensus(ctx, consensusClient, queryID)
+
+if decision == "approve" {
+    // Then: Threshold sign the approval
+    signature, _ := thresholdSign(ctx, parties, approvalData)
+    submitApproval(approvalData, signature)
+}
+```

@@ -1,0 +1,532 @@
+---
+title: Server Implementation
+description: Build ZAP servers to expose tools, resources, and prompts
+---
+
+# Server Implementation
+
+ZAP Go provides the building blocks to implement ZAP servers that expose tools, resources, and prompts to clients.
+
+## Server Architecture
+
+A ZAP server implements the `Zap` interface defined in the ZAP schema. The server handles:
+
+1. Client initialization and capability negotiation
+2. Tool listing and execution
+3. Resource listing and reading
+4. Prompt listing and generation
+5. Log message handling
+
+## Basic Server Structure
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "log"
+    "net"
+
+    "capnproto.org/go/capnp/v3"
+    "capnproto.org/go/capnp/v3/rpc"
+    zap "github.com/zap-protocol/zap-go"
+)
+
+// Server implements the Zap interface
+type Server struct {
+    name    string
+    version string
+    tools   []zap.ToolData
+}
+
+func NewServer() *Server {
+    return &Server{
+        name:    "example-server",
+        version: "1.0.0",
+        tools: []zap.ToolData{
+            {
+                Name:        "echo",
+                Description: "Echo back the input",
+                Schema:      json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}}}`),
+            },
+        },
+    }
+}
+
+func main() {
+    listener, err := net.Listen("tcp", ":9999")
+    if err != nil {
+        log.Fatalf("Failed to listen: %v", err)
+    }
+    defer listener.Close()
+
+    log.Println("Server listening on :9999")
+
+    for {
+        conn, err := listener.Accept()
+        if err != nil {
+            log.Printf("Accept error: %v", err)
+            continue
+        }
+
+        go handleConnection(conn)
+    }
+}
+
+func handleConnection(conn net.Conn) {
+    defer conn.Close()
+
+    server := NewServer()
+    transport := rpc.NewStreamTransport(conn)
+
+    // Create the RPC server
+    rpcServer := rpc.NewConn(transport, &rpc.Options{
+        BootstrapClient: capnp.Client(zap.Zap_ServerToClient(server)),
+    })
+
+    <-rpcServer.Done()
+}
+```
+
+## Implementing the Zap Interface
+
+The full interface requires implementing all ZAP methods:
+
+```go
+// Init handles client initialization
+func (s *Server) Init(ctx context.Context, call zap.Zap_init) error {
+    client, err := call.Args().Client()
+    if err != nil {
+        return err
+    }
+
+    clientName, _ := client.Name()
+    clientVersion, _ := client.Version()
+    log.Printf("Client connected: %s v%s", clientName, clientVersion)
+
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    server, err := results.NewServer()
+    if err != nil {
+        return err
+    }
+
+    server.SetName(s.name)
+    server.SetVersion(s.version)
+
+    caps, err := server.NewCapabilities()
+    if err != nil {
+        return err
+    }
+    caps.SetTools(true)
+    caps.SetResources(true)
+    caps.SetPrompts(true)
+    caps.SetLogging(true)
+
+    return nil
+}
+
+// ListTools returns available tools
+func (s *Server) ListTools(ctx context.Context, call zap.Zap_listTools) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    tools, err := results.NewTools()
+    if err != nil {
+        return err
+    }
+
+    toolList, err := tools.NewTools(int32(len(s.tools)))
+    if err != nil {
+        return err
+    }
+
+    for i, tool := range s.tools {
+        t := toolList.At(i)
+        t.SetName(tool.Name)
+        t.SetDescription(tool.Description)
+        t.SetSchema(tool.Schema)
+    }
+
+    return nil
+}
+
+// CallTool executes a tool
+func (s *Server) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    toolCall, err := call.Args().Call()
+    if err != nil {
+        return err
+    }
+
+    name, _ := toolCall.Name()
+    argsData, _ := toolCall.Args()
+
+    // Parse arguments
+    var args map[string]any
+    if err := json.Unmarshal(argsData, &args); err != nil {
+        return s.returnToolError(call, "Invalid JSON arguments")
+    }
+
+    // Execute the tool
+    var result any
+    var toolErr error
+
+    switch name {
+    case "echo":
+        result, toolErr = s.echoTool(args)
+    default:
+        return s.returnToolError(call, "Unknown tool: "+name)
+    }
+
+    if toolErr != nil {
+        return s.returnToolError(call, toolErr.Error())
+    }
+
+    return s.returnToolResult(call, result)
+}
+
+func (s *Server) echoTool(args map[string]any) (any, error) {
+    message, ok := args["message"].(string)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: message")
+    }
+
+    return map[string]string{
+        "echo": message,
+    }, nil
+}
+
+func (s *Server) returnToolResult(call zap.Zap_callTool, result any) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    toolResult, err := results.NewResult()
+    if err != nil {
+        return err
+    }
+
+    toolResult.SetId(generateID())
+
+    content, _ := json.Marshal(result)
+    toolResult.SetContent(content)
+
+    return nil
+}
+
+func (s *Server) returnToolError(call zap.Zap_callTool, errMsg string) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    toolResult, err := results.NewResult()
+    if err != nil {
+        return err
+    }
+
+    toolResult.SetId(generateID())
+    toolResult.SetError(errMsg)
+
+    return nil
+}
+```
+
+## Resource Implementation
+
+```go
+type ResourceServer struct {
+    resources map[string]zap.ResourceData
+    contents  map[string][]byte
+}
+
+func (s *ResourceServer) ListResources(ctx context.Context, call zap.Zap_listResources) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    resources, err := results.NewResources()
+    if err != nil {
+        return err
+    }
+
+    resourceList, err := resources.NewResources(int32(len(s.resources)))
+    if err != nil {
+        return err
+    }
+
+    i := 0
+    for _, res := range s.resources {
+        r := resourceList.At(i)
+        r.SetUri(res.URI)
+        r.SetName(res.Name)
+        r.SetDescription(res.Description)
+        r.SetMimeType(res.MimeType)
+        i++
+    }
+
+    return nil
+}
+
+func (s *ResourceServer) ReadResource(ctx context.Context, call zap.Zap_readResource) error {
+    uri, err := call.Args().Uri()
+    if err != nil {
+        return err
+    }
+
+    content, ok := s.contents[uri]
+    if !ok {
+        return fmt.Errorf("resource not found: %s", uri)
+    }
+
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    resContent, err := results.NewContent()
+    if err != nil {
+        return err
+    }
+
+    resContent.SetUri(uri)
+    resContent.SetMimeType(s.resources[uri].MimeType)
+
+    // Set text or blob based on mime type
+    if isTextMimeType(s.resources[uri].MimeType) {
+        resContent.Content().SetText(string(content))
+    } else {
+        resContent.Content().SetBlob(content)
+    }
+
+    return nil
+}
+
+func isTextMimeType(mimeType string) bool {
+    switch {
+    case strings.HasPrefix(mimeType, "text/"):
+        return true
+    case mimeType == "application/json":
+        return true
+    case mimeType == "application/xml":
+        return true
+    default:
+        return false
+    }
+}
+```
+
+## Prompt Implementation
+
+```go
+type PromptServer struct {
+    prompts map[string]zap.PromptData
+}
+
+func (s *PromptServer) ListPrompts(ctx context.Context, call zap.Zap_listPrompts) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    prompts, err := results.NewPrompts()
+    if err != nil {
+        return err
+    }
+
+    promptList, err := prompts.NewPrompts(int32(len(s.prompts)))
+    if err != nil {
+        return err
+    }
+
+    i := 0
+    for _, prompt := range s.prompts {
+        p := promptList.At(i)
+        p.SetName(prompt.Name)
+        p.SetDescription(prompt.Description)
+
+        args, _ := p.NewArguments(int32(len(prompt.Arguments)))
+        for j, arg := range prompt.Arguments {
+            a := args.At(j)
+            a.SetName(arg.Name)
+            a.SetDescription(arg.Description)
+            a.SetRequired(arg.Required)
+        }
+        i++
+    }
+
+    return nil
+}
+
+func (s *PromptServer) GetPrompt(ctx context.Context, call zap.Zap_getPrompt) error {
+    name, err := call.Args().Name()
+    if err != nil {
+        return err
+    }
+
+    argsMeta, err := call.Args().Args()
+    if err != nil {
+        return err
+    }
+
+    // Convert metadata to map
+    args := make(map[string]string)
+    entries, _ := argsMeta.Entries()
+    for i := 0; i < entries.Len(); i++ {
+        entry := entries.At(i)
+        key, _ := entry.Key()
+        value, _ := entry.Value()
+        args[key] = value
+    }
+
+    // Generate prompt messages
+    messages := s.generatePrompt(name, args)
+
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    msgList, err := results.NewMessages(int32(len(messages)))
+    if err != nil {
+        return err
+    }
+
+    for i, msg := range messages {
+        m := msgList.At(i)
+
+        switch msg.Role {
+        case "user":
+            m.SetRole(zap.PromptMessage_Role_user)
+        case "assistant":
+            m.SetRole(zap.PromptMessage_Role_assistant)
+        case "system":
+            m.SetRole(zap.PromptMessage_Role_system)
+        }
+
+        content, _ := m.NewContent()
+        content.SetText(msg.Content.Text)
+    }
+
+    return nil
+}
+
+func (s *PromptServer) generatePrompt(name string, args map[string]string) []zap.PromptMessageData {
+    switch name {
+    case "greeting":
+        userName := args["name"]
+        if userName == "" {
+            userName = "User"
+        }
+        return []zap.PromptMessageData{
+            {
+                Role:    "system",
+                Content: zap.ContentData{Text: "You are a friendly assistant."},
+            },
+            {
+                Role:    "user",
+                Content: zap.ContentData{Text: fmt.Sprintf("Please greet %s warmly.", userName)},
+            },
+        }
+    default:
+        return nil
+    }
+}
+```
+
+## Logging Handler
+
+```go
+func (s *Server) Log(ctx context.Context, call zap.Zap_log) error {
+    level := call.Args().Level()
+    message, _ := call.Args().Message()
+    data, _ := call.Args().Data()
+
+    var dataMap map[string]any
+    json.Unmarshal(data, &dataMap)
+
+    levelStr := "INFO"
+    switch level {
+    case zap.Zap_LogLevel_debug:
+        levelStr = "DEBUG"
+    case zap.Zap_LogLevel_info:
+        levelStr = "INFO"
+    case zap.Zap_LogLevel_warn:
+        levelStr = "WARN"
+    case zap.Zap_LogLevel_error:
+        levelStr = "ERROR"
+    }
+
+    log.Printf("[%s] %s %v", levelStr, message, dataMap)
+
+    return nil
+}
+```
+
+## Complete Server Example
+
+See the [examples/server](/docs/examples/server) page for a complete, runnable server implementation.
+
+## Best Practices
+
+### Error Handling
+
+Return meaningful errors in tool results:
+
+```go
+func (s *Server) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    // Validate inputs
+    if !isValidTool(name) {
+        return s.returnToolError(call, fmt.Sprintf("unknown tool: %s", name))
+    }
+
+    // Execute with error capture
+    result, err := s.executeTool(name, args)
+    if err != nil {
+        return s.returnToolError(call, err.Error())
+    }
+
+    return s.returnToolResult(call, result)
+}
+```
+
+### Context Propagation
+
+Respect context cancellation:
+
+```go
+func (s *Server) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    default:
+    }
+
+    // Long-running operation
+    result, err := s.longRunningTool(ctx, args)
+    // ...
+}
+```
+
+### Connection Handling
+
+Clean up resources on disconnect:
+
+```go
+func handleConnection(conn net.Conn) {
+    defer conn.Close()
+
+    server := NewServer()
+    defer server.Cleanup() // Release resources
+
+    // ... handle RPC
+}
+```

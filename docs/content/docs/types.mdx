@@ -1,0 +1,419 @@
+---
+title: Types Reference
+description: Complete reference for all ZAP Go data types
+---
+
+# Types Reference
+
+ZAP Go provides Go structs that map to the ZAP schema types. These types use standard Go conventions with JSON tags for serialization.
+
+## Tool Types
+
+### ToolData
+
+Represents a tool definition exposed by a ZAP server.
+
+```go
+type ToolData struct {
+    Name        string            `json:"name"`
+    Description string            `json:"description"`
+    Schema      json.RawMessage   `json:"schema,omitempty"`
+    Annotations map[string]string `json:"annotations,omitempty"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | `string` | Unique tool identifier |
+| `Description` | `string` | Human-readable description |
+| `Schema` | `json.RawMessage` | JSON Schema for tool arguments |
+| `Annotations` | `map[string]string` | Optional metadata |
+
+**Example:**
+
+```go
+tool := zap.ToolData{
+    Name:        "search",
+    Description: "Search the web for information",
+    Schema:      json.RawMessage(`{
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "limit": {"type": "integer", "default": 10}
+        },
+        "required": ["query"]
+    }`),
+    Annotations: map[string]string{
+        "category": "web",
+        "version":  "1.0",
+    },
+}
+```
+
+### ToolResultData
+
+Represents the result of a tool execution.
+
+```go
+type ToolResultData struct {
+    ID       string            `json:"id"`
+    Content  json.RawMessage   `json:"content,omitempty"`
+    Error    string            `json:"error,omitempty"`
+    Metadata map[string]string `json:"metadata,omitempty"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | Unique result identifier |
+| `Content` | `json.RawMessage` | Tool output as JSON |
+| `Error` | `string` | Error message if execution failed |
+| `Metadata` | `map[string]string` | Additional result metadata |
+
+**Example:**
+
+```go
+// Successful result
+result := zap.ToolResultData{
+    ID:      "call-abc123",
+    Content: json.RawMessage(`{"items": [{"title": "Go Programming"}]}`),
+    Metadata: map[string]string{
+        "duration": "150ms",
+    },
+}
+
+// Error result
+errorResult := zap.ToolResultData{
+    ID:    "call-def456",
+    Error: "Rate limit exceeded",
+}
+```
+
+## Resource Types
+
+### ResourceData
+
+Represents a resource exposed by a ZAP server.
+
+```go
+type ResourceData struct {
+    URI         string            `json:"uri"`
+    Name        string            `json:"name"`
+    Description string            `json:"description"`
+    MimeType    string            `json:"mimeType"`
+    Annotations map[string]string `json:"annotations,omitempty"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `URI` | `string` | Unique resource identifier (RFC 3986) |
+| `Name` | `string` | Human-readable name |
+| `Description` | `string` | Resource description |
+| `MimeType` | `string` | Content type (e.g., "text/plain") |
+| `Annotations` | `map[string]string` | Optional metadata |
+
+**Example:**
+
+```go
+resource := zap.ResourceData{
+    URI:         "file:///etc/config.json",
+    Name:        "Configuration",
+    Description: "Application configuration file",
+    MimeType:    "application/json",
+}
+```
+
+### ResourceContentData
+
+Represents the content of a resource.
+
+```go
+type ResourceContentData struct {
+    URI      string `json:"uri"`
+    MimeType string `json:"mimeType"`
+    Text     string `json:"text,omitempty"`
+    Blob     []byte `json:"blob,omitempty"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `URI` | `string` | Resource identifier |
+| `MimeType` | `string` | Content type |
+| `Text` | `string` | Text content (for text types) |
+| `Blob` | `[]byte` | Binary content (for binary types) |
+
+**Example:**
+
+```go
+// Text content
+textContent := zap.ResourceContentData{
+    URI:      "file:///config.json",
+    MimeType: "application/json",
+    Text:     `{"debug": true}`,
+}
+
+// Binary content
+binaryContent := zap.ResourceContentData{
+    URI:      "file:///image.png",
+    MimeType: "image/png",
+    Blob:     imageBytes,
+}
+```
+
+## Prompt Types
+
+### PromptData
+
+Represents a prompt template.
+
+```go
+type PromptData struct {
+    Name        string           `json:"name"`
+    Description string           `json:"description"`
+    Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | `string` | Unique prompt identifier |
+| `Description` | `string` | Prompt description |
+| `Arguments` | `[]PromptArgument` | Template arguments |
+
+### PromptArgument
+
+Represents an argument for a prompt template.
+
+```go
+type PromptArgument struct {
+    Name        string `json:"name"`
+    Description string `json:"description"`
+    Required    bool   `json:"required"`
+}
+```
+
+**Example:**
+
+```go
+prompt := zap.PromptData{
+    Name:        "code-review",
+    Description: "Generate a code review for the given code",
+    Arguments: []zap.PromptArgument{
+        {
+            Name:        "language",
+            Description: "Programming language",
+            Required:    true,
+        },
+        {
+            Name:        "code",
+            Description: "Code to review",
+            Required:    true,
+        },
+        {
+            Name:        "style",
+            Description: "Review style (brief, detailed)",
+            Required:    false,
+        },
+    },
+}
+```
+
+### PromptMessageData
+
+Represents a message in a prompt conversation.
+
+```go
+type PromptMessageData struct {
+    Role    string      `json:"role"`
+    Content ContentData `json:"content"`
+}
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Role` | `string` | Message role: "user", "assistant", "system" |
+| `Content` | `ContentData` | Message content |
+
+### ContentData
+
+Represents message content (text, image, or resource).
+
+```go
+type ContentData struct {
+    Text     string               `json:"text,omitempty"`
+    Image    *ImageContentData    `json:"image,omitempty"`
+    Resource *ResourceContentData `json:"resource,omitempty"`
+}
+```
+
+### ImageContentData
+
+Represents image content in a message.
+
+```go
+type ImageContentData struct {
+    Data     []byte `json:"data"`
+    MimeType string `json:"mimeType"`
+}
+```
+
+**Example:**
+
+```go
+messages := []zap.PromptMessageData{
+    {
+        Role:    "system",
+        Content: zap.ContentData{Text: "You are a code reviewer."},
+    },
+    {
+        Role:    "user",
+        Content: zap.ContentData{Text: "Review this Go code: ..."},
+    },
+}
+```
+
+## Server Types
+
+### ServerInfoData
+
+Represents server information returned during initialization.
+
+```go
+type ServerInfoData struct {
+    Name         string           `json:"name"`
+    Version      string           `json:"version"`
+    Capabilities CapabilitiesData `json:"capabilities"`
+}
+```
+
+### CapabilitiesData
+
+Represents server capabilities.
+
+```go
+type CapabilitiesData struct {
+    Tools     bool `json:"tools"`
+    Resources bool `json:"resources"`
+    Prompts   bool `json:"prompts"`
+    Logging   bool `json:"logging"`
+}
+```
+
+**Example:**
+
+```go
+info := zap.ServerInfoData{
+    Name:    "example-server",
+    Version: "1.0.0",
+    Capabilities: zap.CapabilitiesData{
+        Tools:     true,
+        Resources: true,
+        Prompts:   false,
+        Logging:   true,
+    },
+}
+```
+
+## Log Types
+
+### LogLevel
+
+Represents log severity levels.
+
+```go
+type LogLevel int
+
+const (
+    LogLevelDebug LogLevel = iota
+    LogLevelInfo
+    LogLevelWarn
+    LogLevelError
+)
+```
+
+**Example:**
+
+```go
+// Send a debug log
+client.Log(ctx, zap.LogLevelDebug, "Processing started", data)
+
+// Send an error log
+client.Log(ctx, zap.LogLevelError, "Operation failed", map[string]any{
+    "error": err.Error(),
+})
+```
+
+## Type Conversion
+
+ZAP Go includes helper functions to convert between ZAP types and Go data types:
+
+```go
+// These are internal functions used by the client
+func toolToData(tool Tool) (*ToolData, error)
+func toolResultToData(result ToolResult) (*ToolResultData, error)
+func resourceToData(resource Resource) (*ResourceData, error)
+func resourceContentToData(content ResourceContent) (*ResourceContentData, error)
+func promptToData(prompt Prompt) (*PromptData, error)
+func promptMessageToData(msg PromptMessage) (*PromptMessageData, error)
+func serverInfoToData(info ServerInfo) (*ServerInfoData, error)
+```
+
+## JSON Serialization
+
+All types support JSON serialization via struct tags:
+
+```go
+tool := zap.ToolData{
+    Name:        "search",
+    Description: "Search the web",
+}
+
+// Serialize to JSON
+data, err := json.Marshal(tool)
+// {"name":"search","description":"Search the web"}
+
+// Deserialize from JSON
+var decoded zap.ToolData
+err = json.Unmarshal(data, &decoded)
+```
+
+## Working with Schemas
+
+Tool schemas are stored as `json.RawMessage` for flexibility:
+
+```go
+// Parse schema
+var schema struct {
+    Type       string `json:"type"`
+    Properties map[string]struct {
+        Type        string `json:"type"`
+        Description string `json:"description"`
+    } `json:"properties"`
+    Required []string `json:"required"`
+}
+
+if err := json.Unmarshal(tool.Schema, &schema); err != nil {
+    log.Printf("Invalid schema: %v", err)
+}
+
+// Validate arguments against schema
+for _, prop := range schema.Required {
+    if _, ok := args[prop]; !ok {
+        return fmt.Errorf("missing required argument: %s", prop)
+    }
+}
+```

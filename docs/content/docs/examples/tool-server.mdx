@@ -1,0 +1,598 @@
+---
+title: Tool Server
+description: Complete example of a ZAP server exposing custom tools
+---
+
+# Tool Server Example
+
+This example demonstrates a complete ZAP server that exposes custom tools for clients to call.
+
+## Complete Code
+
+```go
+// main.go
+package main
+
+import (
+    "context"
+    "crypto/rand"
+    "encoding/hex"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "log"
+    "net"
+    "os"
+    "os/signal"
+    "strings"
+    "syscall"
+    "time"
+
+    "capnproto.org/go/capnp/v3"
+    "capnproto.org/go/capnp/v3/rpc"
+    zap "github.com/zap-protocol/zap-go"
+)
+
+// Server implements the ZAP protocol
+type Server struct {
+    name    string
+    version string
+    tools   []zap.ToolData
+}
+
+// NewServer creates a new ZAP server
+func NewServer() *Server {
+    return &Server{
+        name:    "example-tool-server",
+        version: "1.0.0",
+        tools: []zap.ToolData{
+            {
+                Name:        "echo",
+                Description: "Echo back the input message",
+                Schema: json.RawMessage(`{
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to echo"
+                        }
+                    },
+                    "required": ["message"]
+                }`),
+            },
+            {
+                Name:        "uppercase",
+                Description: "Convert text to uppercase",
+                Schema: json.RawMessage(`{
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to convert"
+                        }
+                    },
+                    "required": ["text"]
+                }`),
+            },
+            {
+                Name:        "calculate",
+                Description: "Perform basic arithmetic",
+                Schema: json.RawMessage(`{
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "subtract", "multiply", "divide"],
+                            "description": "Operation to perform"
+                        },
+                        "a": {
+                            "type": "number",
+                            "description": "First operand"
+                        },
+                        "b": {
+                            "type": "number",
+                            "description": "Second operand"
+                        }
+                    },
+                    "required": ["operation", "a", "b"]
+                }`),
+            },
+            {
+                Name:        "timestamp",
+                Description: "Get current timestamp in various formats",
+                Schema: json.RawMessage(`{
+                    "type": "object",
+                    "properties": {
+                        "format": {
+                            "type": "string",
+                            "enum": ["unix", "rfc3339", "human"],
+                            "default": "rfc3339",
+                            "description": "Output format"
+                        }
+                    }
+                }`),
+            },
+            {
+                Name:        "random",
+                Description: "Generate random data",
+                Schema: json.RawMessage(`{
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["hex", "uuid", "number"],
+                            "default": "hex",
+                            "description": "Type of random data"
+                        },
+                        "length": {
+                            "type": "integer",
+                            "default": 16,
+                            "description": "Length for hex output"
+                        }
+                    }
+                }`),
+            },
+        },
+    }
+}
+
+// generateID creates a unique ID for results
+func generateID() string {
+    bytes := make([]byte, 8)
+    rand.Read(bytes)
+    return "call-" + hex.EncodeToString(bytes)
+}
+
+// Init handles client initialization
+func (s *Server) Init(ctx context.Context, call zap.Zap_init) error {
+    // Get client info
+    client, err := call.Args().Client()
+    if err != nil {
+        return err
+    }
+
+    clientName, _ := client.Name()
+    clientVersion, _ := client.Version()
+    log.Printf("Client connected: %s v%s", clientName, clientVersion)
+
+    // Build server info response
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    server, err := results.NewServer()
+    if err != nil {
+        return err
+    }
+
+    server.SetName(s.name)
+    server.SetVersion(s.version)
+
+    caps, err := server.NewCapabilities()
+    if err != nil {
+        return err
+    }
+    caps.SetTools(true)
+    caps.SetResources(false)
+    caps.SetPrompts(false)
+    caps.SetLogging(true)
+
+    return nil
+}
+
+// ListTools returns available tools
+func (s *Server) ListTools(ctx context.Context, call zap.Zap_listTools) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    tools, err := results.NewTools()
+    if err != nil {
+        return err
+    }
+
+    toolList, err := tools.NewTools(int32(len(s.tools)))
+    if err != nil {
+        return err
+    }
+
+    for i, tool := range s.tools {
+        t := toolList.At(i)
+        t.SetName(tool.Name)
+        t.SetDescription(tool.Description)
+        t.SetSchema(tool.Schema)
+    }
+
+    log.Printf("Listed %d tools", len(s.tools))
+    return nil
+}
+
+// CallTool executes a tool
+func (s *Server) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    toolCall, err := call.Args().Call()
+    if err != nil {
+        return err
+    }
+
+    name, _ := toolCall.Name()
+    argsData, _ := toolCall.Args()
+
+    log.Printf("Tool call: %s", name)
+
+    // Parse arguments
+    var args map[string]any
+    if len(argsData) > 0 {
+        if err := json.Unmarshal(argsData, &args); err != nil {
+            return s.returnError(call, "INVALID_ARGS", "Invalid JSON arguments: "+err.Error())
+        }
+    } else {
+        args = make(map[string]any)
+    }
+
+    // Execute the tool
+    var result any
+    var toolErr error
+
+    switch name {
+    case "echo":
+        result, toolErr = s.echoTool(args)
+    case "uppercase":
+        result, toolErr = s.uppercaseTool(args)
+    case "calculate":
+        result, toolErr = s.calculateTool(args)
+    case "timestamp":
+        result, toolErr = s.timestampTool(args)
+    case "random":
+        result, toolErr = s.randomTool(args)
+    default:
+        return s.returnError(call, "UNKNOWN_TOOL", "Unknown tool: "+name)
+    }
+
+    if toolErr != nil {
+        return s.returnError(call, "EXECUTION_ERROR", toolErr.Error())
+    }
+
+    return s.returnResult(call, result)
+}
+
+// Tool implementations
+
+func (s *Server) echoTool(args map[string]any) (any, error) {
+    message, ok := args["message"].(string)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: message")
+    }
+
+    return map[string]string{
+        "echo":      message,
+        "timestamp": time.Now().Format(time.RFC3339),
+    }, nil
+}
+
+func (s *Server) uppercaseTool(args map[string]any) (any, error) {
+    text, ok := args["text"].(string)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: text")
+    }
+
+    return map[string]string{
+        "original":  text,
+        "uppercase": strings.ToUpper(text),
+    }, nil
+}
+
+func (s *Server) calculateTool(args map[string]any) (any, error) {
+    operation, ok := args["operation"].(string)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: operation")
+    }
+
+    a, ok := args["a"].(float64)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: a")
+    }
+
+    b, ok := args["b"].(float64)
+    if !ok {
+        return nil, fmt.Errorf("missing required argument: b")
+    }
+
+    var result float64
+    switch operation {
+    case "add":
+        result = a + b
+    case "subtract":
+        result = a - b
+    case "multiply":
+        result = a * b
+    case "divide":
+        if b == 0 {
+            return nil, fmt.Errorf("division by zero")
+        }
+        result = a / b
+    default:
+        return nil, fmt.Errorf("unknown operation: %s", operation)
+    }
+
+    return map[string]any{
+        "operation": operation,
+        "a":         a,
+        "b":         b,
+        "result":    result,
+    }, nil
+}
+
+func (s *Server) timestampTool(args map[string]any) (any, error) {
+    format, _ := args["format"].(string)
+    if format == "" {
+        format = "rfc3339"
+    }
+
+    now := time.Now()
+    var formatted string
+
+    switch format {
+    case "unix":
+        formatted = fmt.Sprintf("%d", now.Unix())
+    case "rfc3339":
+        formatted = now.Format(time.RFC3339)
+    case "human":
+        formatted = now.Format("Monday, January 2, 2006 at 3:04 PM")
+    default:
+        return nil, fmt.Errorf("unknown format: %s", format)
+    }
+
+    return map[string]any{
+        "format":    format,
+        "timestamp": formatted,
+        "unix":      now.Unix(),
+    }, nil
+}
+
+func (s *Server) randomTool(args map[string]any) (any, error) {
+    randType, _ := args["type"].(string)
+    if randType == "" {
+        randType = "hex"
+    }
+
+    length := 16
+    if l, ok := args["length"].(float64); ok {
+        length = int(l)
+    }
+
+    switch randType {
+    case "hex":
+        bytes := make([]byte, length)
+        rand.Read(bytes)
+        return map[string]any{
+            "type":   "hex",
+            "length": length,
+            "value":  hex.EncodeToString(bytes),
+        }, nil
+
+    case "uuid":
+        bytes := make([]byte, 16)
+        rand.Read(bytes)
+        bytes[6] = (bytes[6] & 0x0f) | 0x40 // Version 4
+        bytes[8] = (bytes[8] & 0x3f) | 0x80 // Variant
+        uuid := fmt.Sprintf("%x-%x-%x-%x-%x",
+            bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
+        return map[string]any{
+            "type":  "uuid",
+            "value": uuid,
+        }, nil
+
+    case "number":
+        bytes := make([]byte, 8)
+        rand.Read(bytes)
+        var num uint64
+        for i, b := range bytes {
+            num |= uint64(b) << (i * 8)
+        }
+        return map[string]any{
+            "type":  "number",
+            "value": num,
+        }, nil
+
+    default:
+        return nil, fmt.Errorf("unknown type: %s", randType)
+    }
+}
+
+// Helper methods
+
+func (s *Server) returnResult(call zap.Zap_callTool, result any) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    toolResult, err := results.NewResult()
+    if err != nil {
+        return err
+    }
+
+    toolResult.SetId(generateID())
+
+    content, err := json.Marshal(result)
+    if err != nil {
+        return err
+    }
+    toolResult.SetContent(content)
+
+    return nil
+}
+
+func (s *Server) returnError(call zap.Zap_callTool, code, message string) error {
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    toolResult, err := results.NewResult()
+    if err != nil {
+        return err
+    }
+
+    toolResult.SetId(generateID())
+
+    errJSON, _ := json.Marshal(map[string]string{
+        "code":    code,
+        "message": message,
+    })
+    toolResult.SetError(string(errJSON))
+
+    log.Printf("Tool error: [%s] %s", code, message)
+    return nil
+}
+
+// Log handles log messages from clients
+func (s *Server) Log(ctx context.Context, call zap.Zap_log) error {
+    level := call.Args().Level()
+    message, _ := call.Args().Message()
+    data, _ := call.Args().Data()
+
+    levelStr := "INFO"
+    switch level {
+    case zap.Zap_LogLevel_debug:
+        levelStr = "DEBUG"
+    case zap.Zap_LogLevel_warn:
+        levelStr = "WARN"
+    case zap.Zap_LogLevel_error:
+        levelStr = "ERROR"
+    }
+
+    if len(data) > 0 {
+        log.Printf("[CLIENT %s] %s: %s", levelStr, message, string(data))
+    } else {
+        log.Printf("[CLIENT %s] %s", levelStr, message)
+    }
+
+    return nil
+}
+
+// Stub implementations for unused methods
+func (s *Server) ListResources(ctx context.Context, call zap.Zap_listResources) error {
+    return fmt.Errorf("resources not supported")
+}
+
+func (s *Server) ReadResource(ctx context.Context, call zap.Zap_readResource) error {
+    return fmt.Errorf("resources not supported")
+}
+
+func (s *Server) Subscribe(ctx context.Context, call zap.Zap_subscribe) error {
+    return fmt.Errorf("subscriptions not supported")
+}
+
+func (s *Server) ListPrompts(ctx context.Context, call zap.Zap_listPrompts) error {
+    return fmt.Errorf("prompts not supported")
+}
+
+func (s *Server) GetPrompt(ctx context.Context, call zap.Zap_getPrompt) error {
+    return fmt.Errorf("prompts not supported")
+}
+
+func main() {
+    addr := flag.String("addr", ":9999", "Listen address")
+    flag.Parse()
+
+    log.SetFlags(log.Ltime | log.Lmicroseconds)
+    log.Printf("Starting ZAP server on %s", *addr)
+
+    listener, err := net.Listen("tcp", *addr)
+    if err != nil {
+        log.Fatalf("Failed to listen: %v", err)
+    }
+    defer listener.Close()
+
+    // Handle shutdown
+    sigCh := make(chan os.Signal, 1)
+    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+    go func() {
+        <-sigCh
+        log.Println("Shutting down...")
+        listener.Close()
+    }()
+
+    log.Println("Server ready, waiting for connections...")
+
+    for {
+        conn, err := listener.Accept()
+        if err != nil {
+            if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+                break
+            }
+            log.Printf("Accept error: %v", err)
+            continue
+        }
+
+        go handleConnection(conn)
+    }
+
+    log.Println("Server stopped")
+}
+
+func handleConnection(conn net.Conn) {
+    defer conn.Close()
+
+    remoteAddr := conn.RemoteAddr().String()
+    log.Printf("New connection from %s", remoteAddr)
+
+    server := NewServer()
+    transport := rpc.NewStreamTransport(conn)
+
+    rpcServer := rpc.NewConn(transport, &rpc.Options{
+        BootstrapClient: capnp.Client(zap.Zap_ServerToClient(server)),
+    })
+
+    <-rpcServer.Done()
+    log.Printf("Connection closed: %s", remoteAddr)
+}
+```
+
+## Running the Server
+
+1. Save the code as `main.go`
+
+2. Initialize and run:
+```bash
+go mod init example
+go get github.com/zap-protocol/zap-go
+go get capnproto.org/go/capnp/v3
+go run main.go
+```
+
+3. In another terminal, run a client to test:
+```bash
+# Use the basic-client example or netcat
+```
+
+## Testing with a Client
+
+```go
+// Simple test client
+client, _ := zap.Connect("localhost:9999")
+defer client.Close()
+
+ctx := context.Background()
+client.Init(ctx, "test", "1.0")
+
+// Test echo
+result, _ := client.CallTool(ctx, "echo", map[string]any{
+    "message": "Hello!",
+})
+fmt.Println(string(result.Content))
+// {"echo":"Hello!","timestamp":"2024-01-15T10:30:00Z"}
+
+// Test calculate
+result, _ = client.CallTool(ctx, "calculate", map[string]any{
+    "operation": "multiply",
+    "a": 6,
+    "b": 7,
+})
+fmt.Println(string(result.Content))
+// {"a":6,"b":7,"operation":"multiply","result":42}
+```

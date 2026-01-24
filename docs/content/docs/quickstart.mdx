@@ -1,0 +1,327 @@
+---
+title: Quick Start
+description: Build your first ZAP client in Go with a complete working example
+---
+
+# Quick Start
+
+This guide walks you through building a complete ZAP client that connects to a server, discovers tools, and executes them.
+
+## Prerequisites
+
+- Go 1.21 or later
+- A running ZAP server (or use the example server below)
+
+## Project Setup
+
+Create a new Go module:
+
+```bash
+mkdir zap-example
+cd zap-example
+go mod init zap-example
+go get github.com/zap-protocol/zap-go
+```
+
+## Basic Client
+
+Create `main.go`:
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "time"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Create a context with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    // Connect to the ZAP server
+    client, err := zap.Connect("localhost:9999")
+    if err != nil {
+        log.Fatalf("Failed to connect: %v", err)
+    }
+    defer client.Close()
+
+    // Initialize the connection with client info
+    serverInfo, err := client.Init(ctx, "example-client", "1.0.0")
+    if err != nil {
+        log.Fatalf("Failed to initialize: %v", err)
+    }
+
+    fmt.Printf("Connected to: %s v%s\n", serverInfo.Name, serverInfo.Version)
+    fmt.Printf("Capabilities:\n")
+    fmt.Printf("  Tools:     %v\n", serverInfo.Capabilities.Tools)
+    fmt.Printf("  Resources: %v\n", serverInfo.Capabilities.Resources)
+    fmt.Printf("  Prompts:   %v\n", serverInfo.Capabilities.Prompts)
+    fmt.Printf("  Logging:   %v\n", serverInfo.Capabilities.Logging)
+
+    // List available tools
+    if serverInfo.Capabilities.Tools {
+        if err := listAndCallTools(ctx, client); err != nil {
+            log.Fatalf("Tool operation failed: %v", err)
+        }
+    }
+
+    // List resources
+    if serverInfo.Capabilities.Resources {
+        if err := listAndReadResources(ctx, client); err != nil {
+            log.Fatalf("Resource operation failed: %v", err)
+        }
+    }
+
+    // List prompts
+    if serverInfo.Capabilities.Prompts {
+        if err := listAndGetPrompts(ctx, client); err != nil {
+            log.Fatalf("Prompt operation failed: %v", err)
+        }
+    }
+}
+
+func listAndCallTools(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n--- Tools ---")
+
+    tools, err := client.ListTools(ctx)
+    if err != nil {
+        return fmt.Errorf("listing tools: %w", err)
+    }
+
+    if len(tools) == 0 {
+        fmt.Println("No tools available")
+        return nil
+    }
+
+    for _, tool := range tools {
+        fmt.Printf("Tool: %s\n", tool.Name)
+        fmt.Printf("  Description: %s\n", tool.Description)
+
+        if tool.Schema != nil {
+            fmt.Printf("  Schema: %s\n", string(tool.Schema))
+        }
+    }
+
+    // Call the first tool as an example
+    tool := tools[0]
+    fmt.Printf("\nCalling tool: %s\n", tool.Name)
+
+    result, err := client.CallTool(ctx, tool.Name, map[string]any{
+        "input": "hello world",
+    })
+    if err != nil {
+        return fmt.Errorf("calling tool %s: %w", tool.Name, err)
+    }
+
+    if result.Error != "" {
+        fmt.Printf("Tool error: %s\n", result.Error)
+    } else {
+        fmt.Printf("Result ID: %s\n", result.ID)
+        fmt.Printf("Content: %s\n", string(result.Content))
+    }
+
+    return nil
+}
+
+func listAndReadResources(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n--- Resources ---")
+
+    resources, err := client.ListResources(ctx)
+    if err != nil {
+        return fmt.Errorf("listing resources: %w", err)
+    }
+
+    if len(resources) == 0 {
+        fmt.Println("No resources available")
+        return nil
+    }
+
+    for _, res := range resources {
+        fmt.Printf("Resource: %s\n", res.Name)
+        fmt.Printf("  URI: %s\n", res.URI)
+        fmt.Printf("  Type: %s\n", res.MimeType)
+        fmt.Printf("  Description: %s\n", res.Description)
+    }
+
+    // Read the first resource
+    res := resources[0]
+    fmt.Printf("\nReading resource: %s\n", res.URI)
+
+    content, err := client.ReadResource(ctx, res.URI)
+    if err != nil {
+        return fmt.Errorf("reading resource %s: %w", res.URI, err)
+    }
+
+    if content.Text != "" {
+        fmt.Printf("Content (text): %s\n", content.Text)
+    } else if content.Blob != nil {
+        fmt.Printf("Content (blob): %d bytes\n", len(content.Blob))
+    }
+
+    return nil
+}
+
+func listAndGetPrompts(ctx context.Context, client *zap.Client) error {
+    fmt.Println("\n--- Prompts ---")
+
+    prompts, err := client.ListPrompts(ctx)
+    if err != nil {
+        return fmt.Errorf("listing prompts: %w", err)
+    }
+
+    if len(prompts) == 0 {
+        fmt.Println("No prompts available")
+        return nil
+    }
+
+    for _, prompt := range prompts {
+        fmt.Printf("Prompt: %s\n", prompt.Name)
+        fmt.Printf("  Description: %s\n", prompt.Description)
+
+        for _, arg := range prompt.Arguments {
+            required := ""
+            if arg.Required {
+                required = " (required)"
+            }
+            fmt.Printf("  Arg: %s - %s%s\n", arg.Name, arg.Description, required)
+        }
+    }
+
+    // Get the first prompt with example arguments
+    prompt := prompts[0]
+    args := make(map[string]string)
+    for _, arg := range prompt.Arguments {
+        args[arg.Name] = "example-value"
+    }
+
+    fmt.Printf("\nGetting prompt: %s\n", prompt.Name)
+
+    messages, err := client.GetPrompt(ctx, prompt.Name, args)
+    if err != nil {
+        return fmt.Errorf("getting prompt %s: %w", prompt.Name, err)
+    }
+
+    for i, msg := range messages {
+        fmt.Printf("Message %d [%s]: %s\n", i+1, msg.Role, msg.Content.Text)
+    }
+
+    return nil
+}
+```
+
+## Running the Client
+
+```bash
+go run main.go
+```
+
+Expected output (when connected to a ZAP server):
+
+```
+Connected to: example-server v1.0.0
+Capabilities:
+  Tools:     true
+  Resources: true
+  Prompts:   true
+  Logging:   true
+
+--- Tools ---
+Tool: search
+  Description: Search the web for information
+  Schema: {"type":"object","properties":{"query":{"type":"string"}}}
+
+Calling tool: search
+Result ID: call-123
+Content: {"results":[...]}
+
+--- Resources ---
+Resource: config
+  URI: file:///config.json
+  Type: application/json
+  Description: Application configuration
+
+Reading resource: file:///config.json
+Content (text): {"debug":true,"port":9999}
+
+--- Prompts ---
+Prompt: greeting
+  Description: Generate a greeting message
+  Arg: name - The name to greet (required)
+
+Getting prompt: greeting
+Message 1 [system]: You are a helpful assistant.
+Message 2 [user]: Please greet example-value warmly.
+```
+
+## Error Handling
+
+ZAP Go uses standard Go error handling. Always check errors:
+
+```go
+client, err := zap.Connect("localhost:9999")
+if err != nil {
+    // Handle connection failure
+    log.Fatalf("connection failed: %v", err)
+}
+
+// Use the client...
+
+result, err := client.CallTool(ctx, "search", args)
+if err != nil {
+    // Handle RPC error
+    log.Printf("tool call failed: %v", err)
+    return
+}
+
+// Also check the tool result for application-level errors
+if result.Error != "" {
+    log.Printf("tool returned error: %s", result.Error)
+    return
+}
+```
+
+## Context and Timeouts
+
+Always use contexts to control request lifecycles:
+
+```go
+// Request-specific timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+result, err := client.CallTool(ctx, "slow-tool", args)
+if err != nil {
+    if ctx.Err() == context.DeadlineExceeded {
+        log.Println("Request timed out")
+    }
+    return
+}
+```
+
+## Logging
+
+Send logs to the server for debugging:
+
+```go
+// Log levels: Debug, Info, Warn, Error
+err := client.Log(ctx, zap.LogLevelInfo, "Processing started", map[string]any{
+    "toolName": "search",
+    "args":     args,
+})
+if err != nil {
+    log.Printf("Failed to send log: %v", err)
+}
+```
+
+## Next Steps
+
+- [Client API](/docs/client) - Complete client reference
+- [Types](/docs/types) - Data type documentation
+- [Examples](/docs/examples) - More code examples

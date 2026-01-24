@@ -1,0 +1,101 @@
+---
+title: Overview
+description: Go bindings for ZAP - Zero-Copy App Proto for high-performance AI agent communication
+---
+
+# ZAP Go
+
+ZAP Go provides idiomatic Go bindings for the **ZAP** (Zero-Copy App Proto) protocol, a high-performance ZAP RPC framework designed for AI agent communication.
+
+## What is ZAP?
+
+ZAP is a protocol built on ZAP that enables efficient communication between AI agents, tools, and resources. It provides:
+
+- **Zero-copy message passing** - No serialization overhead for large payloads
+- **Strong typing** - Schema-defined interfaces with compile-time safety
+- **Streaming support** - Native support for streaming responses
+- **MCP compatibility** - Bridge to Model Context Protocol servers
+
+## Features
+
+### Core Protocol
+
+- Full ZAP protocol implementation (tools, resources, prompts)
+- Context-aware cancellation and timeouts
+- Structured logging with levels
+
+### Security
+
+- Post-quantum cryptography (ML-KEM, ML-DSA)
+- W3C DID (Decentralized Identifier) support
+- Ringtail threshold signatures
+
+### Coordination
+
+- MCP Gateway for bridging to MCP servers
+- Agent consensus voting for distributed decisions
+- Multi-agent coordination primitives
+
+## Quick Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Connect to a ZAP server
+    client, err := zap.Connect("localhost:9999")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    // Initialize the connection
+    info, err := client.Init(context.Background(), "my-agent", "1.0.0")
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Connected to %s v%s", info.Name, info.Version)
+
+    // List available tools
+    tools, err := client.ListTools(context.Background())
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, tool := range tools {
+        log.Printf("Tool: %s - %s", tool.Name, tool.Description)
+    }
+}
+```
+
+## Architecture
+
+ZAP Go is built on three layers:
+
+1. **ZAP Schema** (`zap.capnp`) - Protocol definition
+2. **Generated Code** (`zap.capnp.go`) - Type-safe Go bindings
+3. **Client Library** (`client.go`, `types.go`) - Idiomatic Go API
+
+The library uses the official [ZAP Go implementation](https://pkg.go.dev/capnproto.org/go/capnp/v3) for zero-copy message handling.
+
+## Related Projects
+
+| Package | Description |
+|---------|-------------|
+| [zap-protocol/zap](https://github.com/zap-protocol/zap) | Core schema and Rust implementation |
+| [zap-protocol/zap-ts](https://github.com/zap-protocol/zap-ts) | TypeScript bindings |
+| [zap-protocol/zap-py](https://github.com/zap-protocol/zap-py) | Python bindings |
+| [zap-protocol/zap-cpp](https://github.com/zap-protocol/zap-cpp) | C/C++ bindings |
+
+## Next Steps
+
+- [Installation](/docs/installation) - Set up your development environment
+- [Quick Start](/docs/quickstart) - Build your first ZAP client
+- [Client API](/docs/client) - Complete client reference

@@ -1,0 +1,462 @@
+---
+title: MCP Gateway
+description: Bridge ZAP to Model Context Protocol (MCP) servers
+---
+
+# MCP Gateway
+
+The ZAP Gateway interface enables bridging to Model Context Protocol (MCP) servers, allowing ZAP clients to access MCP tools, resources, and prompts through a unified interface.
+
+## Overview
+
+The Gateway extends the base ZAP interface with server management capabilities:
+
+```
+interface Gateway extends(Zap) {
+    addServer(name, url, config) -> id
+    removeServer(id)
+    listServers() -> servers
+    serverStatus(id) -> status
+}
+```
+
+This allows a single ZAP connection to aggregate tools from multiple MCP servers.
+
+## Schema Definition
+
+The Gateway schema is defined in `zap.capnp`:
+
+```capnp
+interface Gateway extends(Zap) {
+  # Add MCP server
+  addServer @0 (name :Text, url :Text, config :ServerConfig) -> (id :Text);
+
+  # Remove MCP server
+  removeServer @1 (id :Text) -> ();
+
+  # List connected servers
+  listServers @2 () -> (servers :List(ConnectedServer));
+
+  # Get server status
+  serverStatus @3 (id :Text) -> (status :ServerStatus);
+
+  struct ServerConfig {
+    transport @0 :Transport;
+    auth @1 :Auth;
+    timeout @2 :UInt32;  # milliseconds
+
+    enum Transport {
+      stdio @0;
+      http @1;
+      websocket @2;
+      zap @3;
+      unix @4;
+    }
+
+    struct Auth {
+      union {
+        none @0 :Void;
+        bearer @1 :Text;
+        basic @2 :BasicAuth;
+      }
+
+      struct BasicAuth {
+        username @0 :Text;
+        password @1 :Text;
+      }
+    }
+  }
+
+  struct ConnectedServer {
+    id @0 :Text;
+    name @1 :Text;
+    url @2 :Text;
+    status @3 :ServerStatus;
+    tools @4 :UInt32;
+    resources @5 :UInt32;
+  }
+
+  enum ServerStatus {
+    connecting @0;
+    connected @1;
+    disconnected @2;
+    error @3;
+  }
+}
+```
+
+## Gateway Client Usage
+
+### Connecting to a Gateway
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Connect to the ZAP gateway
+    client, err := zap.ConnectGateway("localhost:9999")
+    if err != nil {
+        log.Fatalf("Failed to connect: %v", err)
+    }
+    defer client.Close()
+
+    ctx := context.Background()
+
+    // Add an MCP server via stdio
+    serverID, err := client.AddServer(ctx, "filesystem", "npx", zap.ServerConfig{
+        Transport: zap.TransportStdio,
+        Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+        Timeout:   30000,
+    })
+    if err != nil {
+        log.Fatalf("Failed to add server: %v", err)
+    }
+
+    log.Printf("Added server with ID: %s", serverID)
+
+    // Add an HTTP-based MCP server
+    httpServerID, err := client.AddServer(ctx, "api-server", "http://localhost:8080/mcp", zap.ServerConfig{
+        Transport: zap.TransportHTTP,
+        Auth: zap.Auth{
+            Type:   zap.AuthBearer,
+            Bearer: "secret-token",
+        },
+        Timeout: 10000,
+    })
+    if err != nil {
+        log.Fatalf("Failed to add HTTP server: %v", err)
+    }
+
+    // List all connected servers
+    servers, err := client.ListServers(ctx)
+    if err != nil {
+        log.Fatalf("Failed to list servers: %v", err)
+    }
+
+    for _, server := range servers {
+        log.Printf("Server: %s (%s)", server.Name, server.Status)
+        log.Printf("  Tools: %d, Resources: %d", server.Tools, server.Resources)
+    }
+
+    // Now ListTools/CallTool will aggregate from all connected servers
+    tools, err := client.ListTools(ctx)
+    if err != nil {
+        log.Fatalf("Failed to list tools: %v", err)
+    }
+
+    log.Printf("Total tools available: %d", len(tools))
+    for _, tool := range tools {
+        log.Printf("  - %s", tool.Name)
+    }
+}
+```
+
+### Transport Types
+
+The Gateway supports multiple transport mechanisms:
+
+```go
+// Stdio transport - spawns a process
+config := zap.ServerConfig{
+    Transport: zap.TransportStdio,
+    Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/path"},
+}
+
+// HTTP transport - connects to HTTP endpoint
+config := zap.ServerConfig{
+    Transport: zap.TransportHTTP,
+    Auth: zap.Auth{
+        Type:   zap.AuthBearer,
+        Bearer: "token",
+    },
+}
+
+// WebSocket transport
+config := zap.ServerConfig{
+    Transport: zap.TransportWebSocket,
+}
+
+// ZAP transport - connect to another ZAP server
+config := zap.ServerConfig{
+    Transport: zap.TransportZap,
+}
+
+// Unix socket transport
+config := zap.ServerConfig{
+    Transport: zap.TransportUnix,
+}
+```
+
+### Authentication
+
+The Gateway supports multiple authentication methods:
+
+```go
+// No authentication
+config := zap.ServerConfig{
+    Auth: zap.Auth{Type: zap.AuthNone},
+}
+
+// Bearer token
+config := zap.ServerConfig{
+    Auth: zap.Auth{
+        Type:   zap.AuthBearer,
+        Bearer: "your-api-key",
+    },
+}
+
+// Basic auth
+config := zap.ServerConfig{
+    Auth: zap.Auth{
+        Type:     zap.AuthBasic,
+        Username: "user",
+        Password: "pass",
+    },
+}
+```
+
+### Server Status Monitoring
+
+```go
+// Check individual server status
+status, err := client.ServerStatus(ctx, serverID)
+if err != nil {
+    log.Fatalf("Failed to get status: %v", err)
+}
+
+switch status {
+case zap.StatusConnecting:
+    log.Println("Server is connecting...")
+case zap.StatusConnected:
+    log.Println("Server is connected")
+case zap.StatusDisconnected:
+    log.Println("Server is disconnected")
+case zap.StatusError:
+    log.Println("Server encountered an error")
+}
+```
+
+### Removing Servers
+
+```go
+// Remove a server by ID
+err := client.RemoveServer(ctx, serverID)
+if err != nil {
+    log.Printf("Failed to remove server: %v", err)
+}
+```
+
+## Implementing a Gateway
+
+To implement a Gateway server, extend the base ZAP server:
+
+```go
+type GatewayServer struct {
+    *Server
+    mu       sync.RWMutex
+    servers  map[string]*MCPConnection
+}
+
+func NewGatewayServer() *GatewayServer {
+    return &GatewayServer{
+        Server:  NewServer(),
+        servers: make(map[string]*MCPConnection),
+    }
+}
+
+func (g *GatewayServer) AddServer(ctx context.Context, call zap.Gateway_addServer) error {
+    name, _ := call.Args().Name()
+    url, _ := call.Args().Url()
+    config, _ := call.Args().Config()
+
+    // Create connection based on transport type
+    conn, err := g.createConnection(url, config)
+    if err != nil {
+        return err
+    }
+
+    // Generate unique ID
+    id := generateServerID()
+
+    g.mu.Lock()
+    g.servers[id] = conn
+    g.mu.Unlock()
+
+    // Start connection
+    go conn.Connect()
+
+    results, _ := call.AllocResults()
+    results.SetId(id)
+
+    return nil
+}
+
+func (g *GatewayServer) ListServers(ctx context.Context, call zap.Gateway_listServers) error {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
+    results, _ := call.AllocResults()
+    servers, _ := results.NewServers(int32(len(g.servers)))
+
+    i := 0
+    for id, conn := range g.servers {
+        s := servers.At(i)
+        s.SetId(id)
+        s.SetName(conn.Name)
+        s.SetUrl(conn.URL)
+        s.SetStatus(conn.Status)
+        s.SetTools(uint32(len(conn.Tools)))
+        s.SetResources(uint32(len(conn.Resources)))
+        i++
+    }
+
+    return nil
+}
+
+// Override ListTools to aggregate from all servers
+func (g *GatewayServer) ListTools(ctx context.Context, call zap.Zap_listTools) error {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
+    var allTools []zap.ToolData
+
+    // Collect tools from all connected servers
+    for _, conn := range g.servers {
+        if conn.Status == zap.StatusConnected {
+            allTools = append(allTools, conn.Tools...)
+        }
+    }
+
+    results, _ := call.AllocResults()
+    tools, _ := results.NewTools()
+    toolList, _ := tools.NewTools(int32(len(allTools)))
+
+    for i, tool := range allTools {
+        t := toolList.At(i)
+        t.SetName(tool.Name)
+        t.SetDescription(tool.Description)
+        t.SetSchema(tool.Schema)
+    }
+
+    return nil
+}
+```
+
+## Tool Routing
+
+When a tool is called through the Gateway, it routes to the appropriate MCP server:
+
+```go
+func (g *GatewayServer) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    toolCall, _ := call.Args().Call()
+    name, _ := toolCall.Name()
+
+    // Find which server owns this tool
+    g.mu.RLock()
+    var targetConn *MCPConnection
+    for _, conn := range g.servers {
+        for _, tool := range conn.Tools {
+            if tool.Name == name {
+                targetConn = conn
+                break
+            }
+        }
+    }
+    g.mu.RUnlock()
+
+    if targetConn == nil {
+        return g.returnToolError(call, "Tool not found: "+name)
+    }
+
+    // Forward the call to the MCP server
+    result, err := targetConn.CallTool(ctx, name, argsData)
+    if err != nil {
+        return g.returnToolError(call, err.Error())
+    }
+
+    return g.returnToolResult(call, result)
+}
+```
+
+## Use Cases
+
+### Multi-Model Aggregation
+
+Combine tools from multiple AI providers:
+
+```go
+// Add OpenAI-based tools
+client.AddServer(ctx, "openai-tools", "http://openai-mcp:8080", config)
+
+// Add Claude-based tools
+client.AddServer(ctx, "claude-tools", "http://claude-mcp:8080", config)
+
+// Add local tools
+client.AddServer(ctx, "local-tools", "/usr/local/bin/local-mcp", stdioConfig)
+
+// All tools now accessible through single interface
+tools, _ := client.ListTools(ctx)
+```
+
+### Dynamic Tool Discovery
+
+Automatically discover and register MCP servers:
+
+```go
+func discoverAndConnect(client *zap.GatewayClient, ctx context.Context) {
+    // Discover MCP servers on network
+    servers := mdns.Discover("_mcp._tcp")
+
+    for _, server := range servers {
+        _, err := client.AddServer(ctx, server.Name, server.Address, zap.ServerConfig{
+            Transport: zap.TransportHTTP,
+            Timeout:   5000,
+        })
+        if err != nil {
+            log.Printf("Failed to add %s: %v", server.Name, err)
+        }
+    }
+}
+```
+
+### Failover and Load Balancing
+
+```go
+type LoadBalancedGateway struct {
+    *GatewayServer
+    toolRoutes map[string][]*MCPConnection // tool name -> available servers
+}
+
+func (g *LoadBalancedGateway) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    name, _ := call.Args().Call().Name()
+
+    // Get available servers for this tool
+    servers := g.toolRoutes[name]
+    if len(servers) == 0 {
+        return g.returnToolError(call, "No servers available for: "+name)
+    }
+
+    // Try each server until one succeeds
+    for _, server := range servers {
+        if server.Status != zap.StatusConnected {
+            continue
+        }
+
+        result, err := server.CallTool(ctx, name, argsData)
+        if err == nil {
+            return g.returnToolResult(call, result)
+        }
+
+        log.Printf("Server %s failed, trying next: %v", server.Name, err)
+    }
+
+    return g.returnToolError(call, "All servers failed for: "+name)
+}
+```

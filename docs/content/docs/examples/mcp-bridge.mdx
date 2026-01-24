@@ -1,0 +1,717 @@
+---
+title: MCP Bridge
+description: Example of bridging ZAP to MCP servers
+---
+
+# MCP Bridge Example
+
+This example demonstrates how to create a ZAP Gateway that bridges to Model Context Protocol (MCP) servers, allowing ZAP clients to access MCP tools through a unified interface.
+
+## Architecture
+
+```
+ZAP Client <---> ZAP Gateway <---> MCP Server 1 (stdio)
+                            <---> MCP Server 2 (HTTP)
+                            <---> MCP Server 3 (WebSocket)
+```
+
+## Gateway Implementation
+
+```go
+// main.go
+package main
+
+import (
+    "bufio"
+    "context"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "os"
+    "os/exec"
+    "os/signal"
+    "sync"
+    "syscall"
+    "time"
+
+    "capnproto.org/go/capnp/v3"
+    "capnproto.org/go/capnp/v3/rpc"
+    zap "github.com/zap-protocol/zap-go"
+)
+
+// MCPServer represents a connected MCP server
+type MCPServer struct {
+    ID        string
+    Name      string
+    URL       string
+    Status    zap.ServerStatus
+    Transport TransportType
+    Tools     []zap.ToolData
+    Resources []zap.ResourceData
+
+    // Transport-specific fields
+    cmd    *exec.Cmd
+    stdin  io.WriteCloser
+    stdout *bufio.Reader
+
+    mu sync.RWMutex
+}
+
+type TransportType int
+
+const (
+    TransportStdio TransportType = iota
+    TransportHTTP
+    TransportWebSocket
+)
+
+// Gateway implements the ZAP Gateway interface
+type Gateway struct {
+    name    string
+    version string
+
+    mu      sync.RWMutex
+    servers map[string]*MCPServer
+}
+
+// NewGateway creates a new MCP Gateway
+func NewGateway() *Gateway {
+    return &Gateway{
+        name:    "mcp-gateway",
+        version: "1.0.0",
+        servers: make(map[string]*MCPServer),
+    }
+}
+
+// ZAP Interface Methods
+
+func (g *Gateway) Init(ctx context.Context, call zap.Zap_init) error {
+    client, err := call.Args().Client()
+    if err != nil {
+        return err
+    }
+
+    clientName, _ := client.Name()
+    clientVersion, _ := client.Version()
+    log.Printf("Client connected: %s v%s", clientName, clientVersion)
+
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    server, err := results.NewServer()
+    if err != nil {
+        return err
+    }
+
+    server.SetName(g.name)
+    server.SetVersion(g.version)
+
+    caps, err := server.NewCapabilities()
+    if err != nil {
+        return err
+    }
+    caps.SetTools(true)
+    caps.SetResources(true)
+    caps.SetPrompts(false)
+    caps.SetLogging(true)
+
+    return nil
+}
+
+func (g *Gateway) ListTools(ctx context.Context, call zap.Zap_listTools) error {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
+    // Aggregate tools from all connected servers
+    var allTools []zap.ToolData
+    for _, server := range g.servers {
+        if server.Status == zap.StatusConnected {
+            server.mu.RLock()
+            allTools = append(allTools, server.Tools...)
+            server.mu.RUnlock()
+        }
+    }
+
+    results, err := call.AllocResults()
+    if err != nil {
+        return err
+    }
+
+    tools, err := results.NewTools()
+    if err != nil {
+        return err
+    }
+
+    toolList, err := tools.NewTools(int32(len(allTools)))
+    if err != nil {
+        return err
+    }
+
+    for i, tool := range allTools {
+        t := toolList.At(i)
+        t.SetName(tool.Name)
+        t.SetDescription(tool.Description)
+        t.SetSchema(tool.Schema)
+    }
+
+    log.Printf("Listed %d tools from %d servers", len(allTools), len(g.servers))
+    return nil
+}
+
+func (g *Gateway) CallTool(ctx context.Context, call zap.Zap_callTool) error {
+    toolCall, err := call.Args().Call()
+    if err != nil {
+        return err
+    }
+
+    name, _ := toolCall.Name()
+    argsData, _ := toolCall.Args()
+
+    log.Printf("Gateway call: %s", name)
+
+    // Find the server that owns this tool
+    server, err := g.findToolServer(name)
+    if err != nil {
+        return g.returnToolError(call, "TOOL_NOT_FOUND", err.Error())
+    }
+
+    // Forward the call to the MCP server
+    result, err := g.callMCPTool(ctx, server, name, argsData)
+    if err != nil {
+        return g.returnToolError(call, "MCP_ERROR", err.Error())
+    }
+
+    return g.returnToolResult(call, result)
+}
+
+func (g *Gateway) findToolServer(toolName string) (*MCPServer, error) {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
+    for _, server := range g.servers {
+        if server.Status != zap.StatusConnected {
+            continue
+        }
+
+        server.mu.RLock()
+        for _, tool := range server.Tools {
+            if tool.Name == toolName {
+                server.mu.RUnlock()
+                return server, nil
+            }
+        }
+        server.mu.RUnlock()
+    }
+
+    return nil, fmt.Errorf("tool not found: %s", toolName)
+}
+
+func (g *Gateway) callMCPTool(ctx context.Context, server *MCPServer, name string, args []byte) (any, error) {
+    switch server.Transport {
+    case TransportStdio:
+        return g.callStdioTool(ctx, server, name, args)
+    case TransportHTTP:
+        return g.callHTTPTool(ctx, server, name, args)
+    default:
+        return nil, fmt.Errorf("unsupported transport")
+    }
+}
+
+// MCP JSON-RPC structures
+type MCPRequest struct {
+    JSONRPC string `json:"jsonrpc"`
+    ID      int    `json:"id"`
+    Method  string `json:"method"`
+    Params  any    `json:"params,omitempty"`
+}
+
+type MCPResponse struct {
+    JSONRPC string          `json:"jsonrpc"`
+    ID      int             `json:"id"`
+    Result  json.RawMessage `json:"result,omitempty"`
+    Error   *MCPError       `json:"error,omitempty"`
+}
+
+type MCPError struct {
+    Code    int    `json:"code"`
+    Message string `json:"message"`
+}
+
+func (g *Gateway) callStdioTool(ctx context.Context, server *MCPServer, name string, args []byte) (any, error) {
+    server.mu.Lock()
+    defer server.mu.Unlock()
+
+    // Build MCP request
+    var params any
+    json.Unmarshal(args, &params)
+
+    request := MCPRequest{
+        JSONRPC: "2.0",
+        ID:      1,
+        Method:  "tools/call",
+        Params: map[string]any{
+            "name":      name,
+            "arguments": params,
+        },
+    }
+
+    // Send request
+    reqData, _ := json.Marshal(request)
+    reqData = append(reqData, '\n')
+
+    _, err := server.stdin.Write(reqData)
+    if err != nil {
+        return nil, fmt.Errorf("write failed: %w", err)
+    }
+
+    // Read response
+    line, err := server.stdout.ReadBytes('\n')
+    if err != nil {
+        return nil, fmt.Errorf("read failed: %w", err)
+    }
+
+    var response MCPResponse
+    if err := json.Unmarshal(line, &response); err != nil {
+        return nil, fmt.Errorf("parse failed: %w", err)
+    }
+
+    if response.Error != nil {
+        return nil, fmt.Errorf("MCP error [%d]: %s", response.Error.Code, response.Error.Message)
+    }
+
+    var result any
+    json.Unmarshal(response.Result, &result)
+    return result, nil
+}
+
+func (g *Gateway) callHTTPTool(ctx context.Context, server *MCPServer, name string, args []byte) (any, error) {
+    // HTTP implementation would go here
+    return nil, fmt.Errorf("HTTP transport not implemented in this example")
+}
+
+// Gateway-specific methods
+
+func (g *Gateway) AddServer(ctx context.Context, call zap.Gateway_addServer) error {
+    name, _ := call.Args().Name()
+    url, _ := call.Args().Url()
+    config, _ := call.Args().Config()
+
+    log.Printf("Adding MCP server: %s (%s)", name, url)
+
+    // Determine transport type
+    transport := TransportStdio
+    switch config.Transport() {
+    case zap.Gateway_ServerConfig_Transport_http:
+        transport = TransportHTTP
+    case zap.Gateway_ServerConfig_Transport_websocket:
+        transport = TransportWebSocket
+    }
+
+    // Create server entry
+    server := &MCPServer{
+        ID:        generateServerID(),
+        Name:      name,
+        URL:       url,
+        Status:    zap.StatusConnecting,
+        Transport: transport,
+    }
+
+    // Connect based on transport
+    var err error
+    switch transport {
+    case TransportStdio:
+        err = g.connectStdio(server, url)
+    case TransportHTTP:
+        err = g.connectHTTP(server, url)
+    }
+
+    if err != nil {
+        server.Status = zap.StatusError
+        log.Printf("Failed to connect to %s: %v", name, err)
+    } else {
+        server.Status = zap.StatusConnected
+        log.Printf("Connected to %s (%d tools)", name, len(server.Tools))
+    }
+
+    // Store server
+    g.mu.Lock()
+    g.servers[server.ID] = server
+    g.mu.Unlock()
+
+    // Return server ID
+    results, _ := call.AllocResults()
+    results.SetId(server.ID)
+
+    return nil
+}
+
+func (g *Gateway) connectStdio(server *MCPServer, command string) error {
+    // Parse command
+    parts := strings.Split(command, " ")
+    cmd := exec.Command(parts[0], parts[1:]...)
+
+    stdin, err := cmd.StdinPipe()
+    if err != nil {
+        return err
+    }
+
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        return err
+    }
+
+    if err := cmd.Start(); err != nil {
+        return err
+    }
+
+    server.cmd = cmd
+    server.stdin = stdin
+    server.stdout = bufio.NewReader(stdout)
+
+    // Initialize MCP connection
+    if err := g.initializeMCP(server); err != nil {
+        cmd.Process.Kill()
+        return err
+    }
+
+    return nil
+}
+
+func (g *Gateway) initializeMCP(server *MCPServer) error {
+    // Send initialize request
+    initReq := MCPRequest{
+        JSONRPC: "2.0",
+        ID:      1,
+        Method:  "initialize",
+        Params: map[string]any{
+            "protocolVersion": "2024-11-05",
+            "capabilities":    map[string]any{},
+            "clientInfo": map[string]string{
+                "name":    "zap-gateway",
+                "version": "1.0.0",
+            },
+        },
+    }
+
+    reqData, _ := json.Marshal(initReq)
+    reqData = append(reqData, '\n')
+    server.stdin.Write(reqData)
+
+    // Read response
+    line, err := server.stdout.ReadBytes('\n')
+    if err != nil {
+        return err
+    }
+
+    var response MCPResponse
+    if err := json.Unmarshal(line, &response); err != nil {
+        return err
+    }
+
+    // Send initialized notification
+    notif := MCPRequest{
+        JSONRPC: "2.0",
+        Method:  "notifications/initialized",
+    }
+    notifData, _ := json.Marshal(notif)
+    notifData = append(notifData, '\n')
+    server.stdin.Write(notifData)
+
+    // List tools
+    return g.refreshTools(server)
+}
+
+func (g *Gateway) refreshTools(server *MCPServer) error {
+    listReq := MCPRequest{
+        JSONRPC: "2.0",
+        ID:      2,
+        Method:  "tools/list",
+    }
+
+    reqData, _ := json.Marshal(listReq)
+    reqData = append(reqData, '\n')
+    server.stdin.Write(reqData)
+
+    line, err := server.stdout.ReadBytes('\n')
+    if err != nil {
+        return err
+    }
+
+    var response MCPResponse
+    if err := json.Unmarshal(line, &response); err != nil {
+        return err
+    }
+
+    // Parse tools from response
+    var toolsResult struct {
+        Tools []struct {
+            Name        string          `json:"name"`
+            Description string          `json:"description"`
+            InputSchema json.RawMessage `json:"inputSchema"`
+        } `json:"tools"`
+    }
+
+    json.Unmarshal(response.Result, &toolsResult)
+
+    server.mu.Lock()
+    server.Tools = nil
+    for _, t := range toolsResult.Tools {
+        server.Tools = append(server.Tools, zap.ToolData{
+            Name:        t.Name,
+            Description: t.Description,
+            Schema:      t.InputSchema,
+            Annotations: map[string]string{
+                "mcp_server": server.Name,
+            },
+        })
+    }
+    server.mu.Unlock()
+
+    return nil
+}
+
+func (g *Gateway) connectHTTP(server *MCPServer, url string) error {
+    // HTTP connection implementation
+    return fmt.Errorf("HTTP transport not implemented in this example")
+}
+
+func (g *Gateway) RemoveServer(ctx context.Context, call zap.Gateway_removeServer) error {
+    id, _ := call.Args().Id()
+
+    g.mu.Lock()
+    server, ok := g.servers[id]
+    if ok {
+        if server.cmd != nil {
+            server.cmd.Process.Kill()
+        }
+        delete(g.servers, id)
+    }
+    g.mu.Unlock()
+
+    if ok {
+        log.Printf("Removed server: %s", id)
+    }
+
+    return nil
+}
+
+func (g *Gateway) ListServers(ctx context.Context, call zap.Gateway_listServers) error {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
+    results, _ := call.AllocResults()
+    servers, _ := results.NewServers(int32(len(g.servers)))
+
+    i := 0
+    for _, server := range g.servers {
+        s := servers.At(i)
+        s.SetId(server.ID)
+        s.SetName(server.Name)
+        s.SetUrl(server.URL)
+        s.SetStatus(zap.Gateway_ServerStatus(server.Status))
+        s.SetTools(uint32(len(server.Tools)))
+        s.SetResources(uint32(len(server.Resources)))
+        i++
+    }
+
+    return nil
+}
+
+func (g *Gateway) ServerStatus(ctx context.Context, call zap.Gateway_serverStatus) error {
+    id, _ := call.Args().Id()
+
+    g.mu.RLock()
+    server, ok := g.servers[id]
+    g.mu.RUnlock()
+
+    results, _ := call.AllocResults()
+
+    if !ok {
+        results.SetStatus(zap.Gateway_ServerStatus_disconnected)
+    } else {
+        results.SetStatus(zap.Gateway_ServerStatus(server.Status))
+    }
+
+    return nil
+}
+
+// Helper methods
+
+func (g *Gateway) returnToolResult(call zap.Zap_callTool, result any) error {
+    results, _ := call.AllocResults()
+    toolResult, _ := results.NewResult()
+    toolResult.SetId(generateID())
+
+    content, _ := json.Marshal(result)
+    toolResult.SetContent(content)
+
+    return nil
+}
+
+func (g *Gateway) returnToolError(call zap.Zap_callTool, code, message string) error {
+    results, _ := call.AllocResults()
+    toolResult, _ := results.NewResult()
+    toolResult.SetId(generateID())
+
+    errJSON, _ := json.Marshal(map[string]string{
+        "code":    code,
+        "message": message,
+    })
+    toolResult.SetError(string(errJSON))
+
+    return nil
+}
+
+// Required ZAP interface methods (delegating to connected servers)
+
+func (g *Gateway) ListResources(ctx context.Context, call zap.Zap_listResources) error {
+    // Similar aggregation as ListTools
+    return fmt.Errorf("not implemented")
+}
+
+func (g *Gateway) ReadResource(ctx context.Context, call zap.Zap_readResource) error {
+    return fmt.Errorf("not implemented")
+}
+
+func (g *Gateway) Subscribe(ctx context.Context, call zap.Zap_subscribe) error {
+    return fmt.Errorf("not implemented")
+}
+
+func (g *Gateway) ListPrompts(ctx context.Context, call zap.Zap_listPrompts) error {
+    return fmt.Errorf("not implemented")
+}
+
+func (g *Gateway) GetPrompt(ctx context.Context, call zap.Zap_getPrompt) error {
+    return fmt.Errorf("not implemented")
+}
+
+func (g *Gateway) Log(ctx context.Context, call zap.Zap_log) error {
+    level := call.Args().Level()
+    message, _ := call.Args().Message()
+    log.Printf("[CLIENT] %v: %s", level, message)
+    return nil
+}
+
+// Utilities
+
+func generateServerID() string {
+    return fmt.Sprintf("server-%d", time.Now().UnixNano())
+}
+
+func generateID() string {
+    return fmt.Sprintf("call-%d", time.Now().UnixNano())
+}
+
+var strings = struct {
+    Split func(string, string) []string
+}{
+    Split: func(s, sep string) []string {
+        // Simple split implementation
+        var result []string
+        start := 0
+        for i := 0; i < len(s); i++ {
+            if i+len(sep) <= len(s) && s[i:i+len(sep)] == sep {
+                result = append(result, s[start:i])
+                start = i + len(sep)
+                i += len(sep) - 1
+            }
+        }
+        result = append(result, s[start:])
+        return result
+    },
+}
+
+func main() {
+    addr := flag.String("addr", ":9999", "Listen address")
+    flag.Parse()
+
+    log.SetFlags(log.Ltime | log.Lmicroseconds)
+    log.Printf("Starting MCP Gateway on %s", *addr)
+
+    listener, err := net.Listen("tcp", *addr)
+    if err != nil {
+        log.Fatalf("Failed to listen: %v", err)
+    }
+    defer listener.Close()
+
+    gateway := NewGateway()
+
+    // Handle shutdown
+    sigCh := make(chan os.Signal, 1)
+    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+    go func() {
+        <-sigCh
+        log.Println("Shutting down...")
+
+        // Clean up MCP servers
+        gateway.mu.Lock()
+        for _, server := range gateway.servers {
+            if server.cmd != nil {
+                server.cmd.Process.Kill()
+            }
+        }
+        gateway.mu.Unlock()
+
+        listener.Close()
+    }()
+
+    log.Println("Gateway ready, waiting for connections...")
+
+    for {
+        conn, err := listener.Accept()
+        if err != nil {
+            break
+        }
+
+        go func(c net.Conn) {
+            defer c.Close()
+
+            transport := rpc.NewStreamTransport(c)
+            rpcServer := rpc.NewConn(transport, &rpc.Options{
+                BootstrapClient: capnp.Client(zap.Gateway_ServerToClient(gateway)),
+            })
+
+            <-rpcServer.Done()
+        }(conn)
+    }
+
+    log.Println("Gateway stopped")
+}
+```
+
+## Usage
+
+1. Start the gateway:
+```bash
+go run main.go -addr=:9999
+```
+
+2. From a client, add MCP servers:
+```go
+client, _ := zap.ConnectGateway("localhost:9999")
+defer client.Close()
+
+// Add filesystem MCP server
+serverID, _ := client.AddServer(ctx, "filesystem",
+    "npx -y @modelcontextprotocol/server-filesystem /tmp",
+    zap.ServerConfig{Transport: zap.TransportStdio})
+
+// Now list aggregated tools
+tools, _ := client.ListTools(ctx)
+for _, tool := range tools {
+    fmt.Printf("Tool: %s (from %s)\n", tool.Name, tool.Annotations["mcp_server"])
+}
+```
+
+## Key Features
+
+- **Multi-server aggregation** - Combine tools from multiple MCP servers
+- **Transport abstraction** - Support stdio, HTTP, WebSocket transports
+- **Dynamic management** - Add/remove servers at runtime
+- **Tool routing** - Automatically route calls to correct server
