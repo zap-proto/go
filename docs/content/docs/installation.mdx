@@ -76,15 +76,15 @@ Ensure `$GOPATH/bin` is in your `PATH`.
 
 ## Regenerating from Schema
 
-If you modify `zap.capnp`, regenerate the Go bindings:
+If you modify `zap.zap`, regenerate the Go bindings:
 
 ```bash
 capnp compile \
   -I$GOPATH/src/capnproto.org/go/capnp/std \
-  -ogo zap.capnp
+  -ogo zap.zap
 ```
 
-This produces `zap.capnp.go` with all type definitions and RPC interfaces.
+This produces `zap.zap.go` with all type definitions and RPC interfaces.
 
 ## Verifying Installation
 
