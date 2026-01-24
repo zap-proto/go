@@ -1,0 +1,9 @@
+{
+  "title": "Examples",
+  "pages": [
+    "index",
+    "basic-client",
+    "tool-server",
+    "mcp-bridge"
+  ]
+}

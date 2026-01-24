@@ -1,0 +1,19 @@
+{
+  "title": "ZAP Go",
+  "pages": [
+    "index",
+    "installation",
+    "quickstart",
+    "---Guides---",
+    "client",
+    "server",
+    "gateway",
+    "---Reference---",
+    "types",
+    "identity",
+    "consensus",
+    "errors",
+    "---Examples---",
+    "examples"
+  ]
+}

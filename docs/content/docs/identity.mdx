@@ -1,0 +1,359 @@
+---
+title: DID Identity
+description: W3C Decentralized Identifier support in ZAP Go
+---
+
+# DID Identity
+
+ZAP Go implements W3C Decentralized Identifiers (DIDs) for agent authentication and identity management.
+
+## Overview
+
+DIDs provide a standard way to identify agents, verify their authenticity, and manage cryptographic keys. ZAP supports multiple DID methods:
+
+| Method | Description | Use Case |
+|--------|-------------|----------|
+| `did:lux` | Lux blockchain-anchored | Production, verifiable on-chain |
+| `did:key` | Self-certifying from key | Development, offline |
+| `did:web` | DNS-based | Web services, easy rotation |
+
+## DID Document
+
+A DID Document contains the public keys and service endpoints for an identity:
+
+```capnp
+struct DidDocument {
+  context @0 :List(Text);  # JSON-LD context
+  id @1 :Text;             # DID subject
+  controller @2 :Text;     # Optional controller DID
+
+  # Verification methods (public keys)
+  verificationMethod @3 :List(VerificationMethod);
+
+  # Verification relationships
+  authentication @4 :List(Text);
+  assertionMethod @5 :List(Text);
+  keyAgreement @6 :List(Text);
+  capabilityInvocation @7 :List(Text);
+  capabilityDelegation @8 :List(Text);
+
+  # Service endpoints
+  service @9 :List(Service);
+}
+```
+
+## Creating a DID
+
+### Using did:key
+
+Self-certifying DIDs can be created from a public key:
+
+```go
+package main
+
+import (
+    "context"
+    "crypto/ed25519"
+    "crypto/rand"
+    "fmt"
+    "log"
+
+    zap "github.com/zap-protocol/zap-go"
+)
+
+func main() {
+    // Generate an ML-DSA key pair (post-quantum)
+    publicKey, privateKey, err := zap.GenerateMLDSAKeyPair()
+    if err != nil {
+        log.Fatalf("Key generation failed: %v", err)
+    }
+
+    // Connect to DID registry
+    client, err := zap.ConnectDIDRegistry("localhost:9999")
+    if err != nil {
+        log.Fatalf("Failed to connect: %v", err)
+    }
+    defer client.Close()
+
+    ctx := context.Background()
+
+    // Create a did:key DID
+    did, err := client.CreateDID(ctx, zap.DidMethodKey, publicKey, nil)
+    if err != nil {
+        log.Fatalf("DID creation failed: %v", err)
+    }
+
+    fmt.Printf("Created DID: did:key:%s\n", did.ID)
+}
+```
+
+### Using did:lux
+
+Blockchain-anchored DIDs provide stronger guarantees:
+
+```go
+// Create a did:lux DID (anchored on Lux blockchain)
+did, err := client.CreateDID(ctx, zap.DidMethodLux, publicKey, []zap.Service{
+    {
+        ID:   "#zap-agent",
+        Type: zap.ServiceTypeZapAgent,
+        Endpoint: zap.ServiceEndpoint{
+            URI: "zap://agent.example.com:9999",
+        },
+    },
+})
+if err != nil {
+    log.Fatalf("DID creation failed: %v", err)
+}
+
+fmt.Printf("Created DID: did:lux:%s\n", did.ID)
+```
+
+## Resolving a DID
+
+Retrieve a DID Document by its identifier:
+
+```go
+document, err := client.ResolveDID(ctx, "did:lux:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+if err != nil {
+    log.Fatalf("Resolution failed: %v", err)
+}
+
+fmt.Printf("DID: %s\n", document.ID)
+fmt.Printf("Controller: %s\n", document.Controller)
+
+// List verification methods
+for _, vm := range document.VerificationMethod {
+    fmt.Printf("Key: %s (%s)\n", vm.ID, vm.Type)
+}
+
+// List services
+for _, svc := range document.Service {
+    fmt.Printf("Service: %s -> %s\n", svc.Type, svc.Endpoint.URI)
+}
+```
+
+## Verification Methods
+
+DID Documents contain verification methods (public keys) for different purposes:
+
+```go
+type VerificationMethod struct {
+    ID                 string // e.g., "did:lux:z6Mk...#keys-1"
+    Type               VerificationMethodType
+    Controller         string
+    PublicKeyMultibase string // Multibase-encoded public key
+    PublicKeyJwk       []byte // JSON Web Key (optional)
+    BlockchainAccountID string // Blockchain account (for did:lux)
+}
+```
+
+**Verification Method Types:**
+
+```go
+const (
+    VerificationMethodJsonWebKey2020 VerificationMethodType = iota
+    VerificationMethodMultikey
+    VerificationMethodMlDsa65VerificationKey2024
+)
+```
+
+## Authentication
+
+Use DIDs for agent authentication:
+
+```go
+// Sign a challenge to prove ownership
+challenge := []byte("random-challenge-from-server")
+signature, err := zap.SignMLDSA(privateKey, challenge)
+if err != nil {
+    log.Fatalf("Signing failed: %v", err)
+}
+
+// Verify the signature
+verified, err := client.VerifySignature(ctx, did, challenge, signature)
+if err != nil {
+    log.Fatalf("Verification failed: %v", err)
+}
+
+if verified {
+    fmt.Println("Authentication successful")
+}
+```
+
+## Updating a DID Document
+
+Update services or add new keys:
+
+```go
+// Add a new service endpoint
+newDoc := document
+newDoc.Service = append(newDoc.Service, zap.Service{
+    ID:   "#messaging",
+    Type: zap.ServiceTypeDIDCommMessaging,
+    Endpoint: zap.ServiceEndpoint{
+        URI:         "https://agent.example.com/didcomm",
+        Accept:      []string{"didcomm/v2"},
+        RoutingKeys: []string{},
+    },
+})
+
+// Sign the update
+updateSignature, err := zap.SignMLDSA(privateKey, serializeDocument(newDoc))
+if err != nil {
+    log.Fatalf("Signing failed: %v", err)
+}
+
+// Submit the update
+success, err := client.UpdateDID(ctx, did, newDoc, updateSignature)
+if err != nil {
+    log.Fatalf("Update failed: %v", err)
+}
+```
+
+## Staking
+
+For did:lux, agents can stake tokens to establish reputation:
+
+```go
+// Get current stake
+stake, err := client.GetStake(ctx, "did:lux:z6Mk...")
+if err != nil {
+    log.Fatalf("Failed to get stake: %v", err)
+}
+fmt.Printf("Current stake: %d\n", stake)
+
+// Set stake (requires signature)
+signature, err := zap.SignMLDSA(privateKey, []byte("stake:1000000"))
+if err != nil {
+    log.Fatalf("Signing failed: %v", err)
+}
+
+success, err := client.SetStake(ctx, did, 1000000, signature)
+if err != nil {
+    log.Fatalf("Staking failed: %v", err)
+}
+```
+
+## Node Identity
+
+Nodes participating in the ZAP network have identities:
+
+```go
+type NodeIdentity struct {
+    DID           zap.Did
+    PublicKey     []byte   // ML-DSA-65 public key (1952 bytes)
+    Stake         uint64   // Staked amount
+    StakeRegistry string   // Registry reference
+}
+```
+
+**Registering a node:**
+
+```go
+identity := zap.NodeIdentity{
+    DID: zap.Did{
+        Method: zap.DidMethodLux,
+        ID:     "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+    },
+    PublicKey: publicKey,
+    Stake:     1000000,
+}
+
+err := client.RegisterNode(ctx, identity)
+if err != nil {
+    log.Fatalf("Node registration failed: %v", err)
+}
+```
+
+## Service Types
+
+DIDs can advertise service endpoints:
+
+```go
+const (
+    ServiceTypeZapAgent        ServiceType = iota // ZAP Agent service
+    ServiceTypeDIDCommMessaging                   // DID Communication
+    ServiceTypeLinkedDomains                      // Linked Domains
+    ServiceTypeCredentialRegistry                 // Credential Registry
+)
+```
+
+**Example ZAP Agent service:**
+
+```go
+service := zap.Service{
+    ID:   "did:lux:z6Mk...#zap-agent",
+    Type: zap.ServiceTypeZapAgent,
+    Endpoint: zap.ServiceEndpoint{
+        URI: "zap://agent.example.com:9999",
+    },
+}
+```
+
+## Post-Quantum Cryptography
+
+ZAP DIDs use ML-DSA-65 for post-quantum security:
+
+```go
+// Generate ML-DSA-65 key pair
+publicKey, privateKey, err := zap.GenerateMLDSAKeyPair()
+// publicKey: 1952 bytes
+// privateKey: varies
+
+// Sign a message
+message := []byte("Hello, World!")
+signature, err := zap.SignMLDSA(privateKey, message)
+// signature: 3293 bytes
+
+// Verify a signature
+valid, err := zap.VerifyMLDSA(publicKey, message, signature)
+```
+
+## DID Registry Interface
+
+The complete DID Registry interface:
+
+```go
+interface DidRegistry {
+    // Resolve a DID to its document
+    resolve(request :DidResolveRequest) -> (response :DidResolveResponse)
+
+    // Create/register a new DID
+    create(request :DidCreateRequest) -> (response :DidCreateResponse)
+
+    // Update a DID document (requires authentication)
+    update(did :Text, document :DidDocument, signature :Data) -> (success :Bool, error :Text)
+
+    // Deactivate a DID (requires authentication)
+    deactivate(did :Text, signature :Data) -> (success :Bool, error :Text)
+
+    // Get stake for a DID
+    getStake(did :Text) -> (amount :UInt64)
+
+    // Set stake for a DID (requires authentication)
+    setStake(did :Text, amount :UInt64, signature :Data) -> (success :Bool, error :Text)
+}
+```
+
+## Best Practices
+
+### Key Management
+
+- Store private keys securely (HSM, secure enclave)
+- Rotate keys periodically
+- Use separate keys for different purposes
+
+### DID Selection
+
+| Use Case | Recommended Method |
+|----------|-------------------|
+| Production agents | `did:lux` |
+| Development/testing | `did:key` |
+| Web services | `did:web` |
+
+### Security
+
+- Always verify DID Documents before trusting
+- Check that verification methods are current
+- Validate signatures with post-quantum algorithms

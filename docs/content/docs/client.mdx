@@ -1,0 +1,442 @@
+---
+title: Client API
+description: Complete reference for the ZAP Go client interface
+---
+
+# Client API
+
+The `Client` type provides the primary interface for communicating with ZAP servers.
+
+## Creating a Client
+
+### Connect
+
+Establishes a TCP connection to a ZAP server.
+
+```go
+func Connect(addr string) (*Client, error)
+```
+
+**Parameters:**
+- `addr` - Server address in `host:port` format
+
+**Returns:**
+- `*Client` - Connected client instance
+- `error` - Connection error if failed
+
+**Example:**
+
+```go
+client, err := zap.Connect("localhost:9999")
+if err != nil {
+    log.Fatalf("Failed to connect: %v", err)
+}
+defer client.Close()
+```
+
+### Close
+
+Closes the connection to the server. Safe to call multiple times.
+
+```go
+func (c *Client) Close() error
+```
+
+**Example:**
+
+```go
+defer client.Close()
+```
+
+## Initialization
+
+### Init
+
+Initializes the connection with client information and receives server capabilities.
+
+```go
+func (c *Client) Init(ctx context.Context, name, version string) (*ServerInfoData, error)
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation and timeout
+- `name` - Client name identifier
+- `version` - Client version string
+
+**Returns:**
+- `*ServerInfoData` - Server information and capabilities
+- `error` - Initialization error if failed
+
+**Example:**
+
+```go
+ctx := context.Background()
+info, err := client.Init(ctx, "my-agent", "1.0.0")
+if err != nil {
+    log.Fatalf("Init failed: %v", err)
+}
+
+fmt.Printf("Server: %s v%s\n", info.Name, info.Version)
+fmt.Printf("Tools enabled: %v\n", info.Capabilities.Tools)
+```
+
+## Tool Operations
+
+### ListTools
+
+Returns all available tools from the server.
+
+```go
+func (c *Client) ListTools(ctx context.Context) ([]ToolData, error)
+```
+
+**Returns:**
+- `[]ToolData` - List of tool definitions
+- `error` - Error if the operation failed
+
+**Example:**
+
+```go
+tools, err := client.ListTools(ctx)
+if err != nil {
+    log.Fatalf("ListTools failed: %v", err)
+}
+
+for _, tool := range tools {
+    fmt.Printf("Tool: %s\n", tool.Name)
+    fmt.Printf("  Description: %s\n", tool.Description)
+
+    // Parse JSON schema if needed
+    if tool.Schema != nil {
+        var schema map[string]any
+        json.Unmarshal(tool.Schema, &schema)
+        fmt.Printf("  Properties: %v\n", schema["properties"])
+    }
+}
+```
+
+### CallTool
+
+Invokes a tool with the specified arguments.
+
+```go
+func (c *Client) CallTool(ctx context.Context, name string, args any) (*ToolResultData, error)
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation and timeout
+- `name` - Name of the tool to call
+- `args` - Arguments as any JSON-serializable value
+
+**Returns:**
+- `*ToolResultData` - Tool execution result
+- `error` - RPC error if the call failed
+
+**Example:**
+
+```go
+// Call with a map
+result, err := client.CallTool(ctx, "search", map[string]any{
+    "query": "Go programming",
+    "limit": 10,
+})
+if err != nil {
+    log.Fatalf("CallTool failed: %v", err)
+}
+
+// Check for tool-level errors
+if result.Error != "" {
+    log.Printf("Tool error: %s", result.Error)
+    return
+}
+
+// Parse the result content
+var searchResults struct {
+    Items []struct {
+        Title string `json:"title"`
+        URL   string `json:"url"`
+    } `json:"items"`
+}
+json.Unmarshal(result.Content, &searchResults)
+
+for _, item := range searchResults.Items {
+    fmt.Printf("- %s: %s\n", item.Title, item.URL)
+}
+```
+
+**Using Typed Arguments:**
+
+```go
+type SearchArgs struct {
+    Query string `json:"query"`
+    Limit int    `json:"limit"`
+}
+
+result, err := client.CallTool(ctx, "search", SearchArgs{
+    Query: "Go programming",
+    Limit: 10,
+})
+```
+
+## Resource Operations
+
+### ListResources
+
+Returns all available resources from the server.
+
+```go
+func (c *Client) ListResources(ctx context.Context) ([]ResourceData, error)
+```
+
+**Example:**
+
+```go
+resources, err := client.ListResources(ctx)
+if err != nil {
+    log.Fatalf("ListResources failed: %v", err)
+}
+
+for _, res := range resources {
+    fmt.Printf("Resource: %s (%s)\n", res.Name, res.MimeType)
+    fmt.Printf("  URI: %s\n", res.URI)
+}
+```
+
+### ReadResource
+
+Reads the content of a resource by URI.
+
+```go
+func (c *Client) ReadResource(ctx context.Context, uri string) (*ResourceContentData, error)
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation and timeout
+- `uri` - Resource URI to read
+
+**Returns:**
+- `*ResourceContentData` - Resource content (text or blob)
+- `error` - Error if the read failed
+
+**Example:**
+
+```go
+content, err := client.ReadResource(ctx, "file:///config.json")
+if err != nil {
+    log.Fatalf("ReadResource failed: %v", err)
+}
+
+switch {
+case content.Text != "":
+    // Text content
+    fmt.Printf("Content: %s\n", content.Text)
+
+case content.Blob != nil:
+    // Binary content
+    fmt.Printf("Binary data: %d bytes\n", len(content.Blob))
+
+    // Save to file
+    os.WriteFile("output.bin", content.Blob, 0644)
+}
+```
+
+## Prompt Operations
+
+### ListPrompts
+
+Returns all available prompt templates from the server.
+
+```go
+func (c *Client) ListPrompts(ctx context.Context) ([]PromptData, error)
+```
+
+**Example:**
+
+```go
+prompts, err := client.ListPrompts(ctx)
+if err != nil {
+    log.Fatalf("ListPrompts failed: %v", err)
+}
+
+for _, prompt := range prompts {
+    fmt.Printf("Prompt: %s\n", prompt.Name)
+    fmt.Printf("  Description: %s\n", prompt.Description)
+
+    for _, arg := range prompt.Arguments {
+        req := ""
+        if arg.Required {
+            req = " *"
+        }
+        fmt.Printf("  - %s: %s%s\n", arg.Name, arg.Description, req)
+    }
+}
+```
+
+### GetPrompt
+
+Retrieves a prompt with arguments substituted.
+
+```go
+func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) ([]PromptMessageData, error)
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation and timeout
+- `name` - Name of the prompt template
+- `args` - Map of argument names to values
+
+**Returns:**
+- `[]PromptMessageData` - List of prompt messages
+- `error` - Error if the operation failed
+
+**Example:**
+
+```go
+messages, err := client.GetPrompt(ctx, "code-review", map[string]string{
+    "language": "Go",
+    "code":     "func main() { fmt.Println(\"Hello\") }",
+})
+if err != nil {
+    log.Fatalf("GetPrompt failed: %v", err)
+}
+
+for _, msg := range messages {
+    fmt.Printf("[%s] %s\n", msg.Role, msg.Content.Text)
+}
+```
+
+## Logging
+
+### Log
+
+Sends a log message to the server.
+
+```go
+func (c *Client) Log(ctx context.Context, level LogLevel, message string, data any) error
+```
+
+**Parameters:**
+- `ctx` - Context for cancellation and timeout
+- `level` - Log severity level
+- `message` - Log message text
+- `data` - Additional structured data (JSON-serializable)
+
+**Log Levels:**
+
+```go
+const (
+    LogLevelDebug LogLevel = iota
+    LogLevelInfo
+    LogLevelWarn
+    LogLevelError
+)
+```
+
+**Example:**
+
+```go
+// Simple log
+err := client.Log(ctx, zap.LogLevelInfo, "Tool execution started", nil)
+
+// Log with structured data
+err := client.Log(ctx, zap.LogLevelDebug, "Processing request", map[string]any{
+    "toolName":  "search",
+    "requestId": "req-123",
+    "args":      args,
+})
+
+// Error log
+err := client.Log(ctx, zap.LogLevelError, "Tool execution failed", map[string]any{
+    "error":   toolErr.Error(),
+    "toolName": "search",
+})
+```
+
+## Thread Safety
+
+The `Client` type is safe for concurrent use. Multiple goroutines can make calls through the same client:
+
+```go
+client, _ := zap.Connect("localhost:9999")
+defer client.Close()
+
+var wg sync.WaitGroup
+for i := 0; i < 10; i++ {
+    wg.Add(1)
+    go func(id int) {
+        defer wg.Done()
+
+        result, err := client.CallTool(ctx, "process", map[string]any{
+            "id": id,
+        })
+        if err != nil {
+            log.Printf("Worker %d failed: %v", id, err)
+            return
+        }
+        log.Printf("Worker %d result: %s", id, result.Content)
+    }(i)
+}
+wg.Wait()
+```
+
+## Best Practices
+
+### Use Contexts
+
+Always pass contexts to enable timeout and cancellation:
+
+```go
+// Per-request timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+result, err := client.CallTool(ctx, "slow-tool", args)
+```
+
+### Check Tool Errors
+
+Tool calls can succeed at the RPC level but return application errors:
+
+```go
+result, err := client.CallTool(ctx, "risky-tool", args)
+if err != nil {
+    // RPC-level error (network, protocol, etc.)
+    return fmt.Errorf("rpc error: %w", err)
+}
+if result.Error != "" {
+    // Application-level error from the tool
+    return fmt.Errorf("tool error: %s", result.Error)
+}
+```
+
+### Handle Connection Loss
+
+Reconnect on connection errors:
+
+```go
+func callWithRetry(ctx context.Context, addr, tool string, args any) (*zap.ToolResultData, error) {
+    var client *zap.Client
+    var err error
+
+    for attempt := 0; attempt < 3; attempt++ {
+        if client == nil {
+            client, err = zap.Connect(addr)
+            if err != nil {
+                time.Sleep(time.Second * time.Duration(attempt+1))
+                continue
+            }
+        }
+
+        result, err := client.CallTool(ctx, tool, args)
+        if err != nil {
+            client.Close()
+            client = nil
+            continue
+        }
+
+        return result, nil
+    }
+
+    return nil, fmt.Errorf("failed after 3 attempts: %w", err)
+}
+```

@@ -1,25 +1,21 @@
-import type { Metadata } from 'next'
-import { Inter, JetBrains_Mono } from 'next/font/google'
-import './globals.css'
+import './global.css';
+import { RootProvider } from 'fumadocs-ui/provider';
+import type { ReactNode } from 'react';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
-const jetbrainsMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' })
+export const metadata = {
+  title: {
+    template: '%s | ZAP Go',
+    default: 'ZAP Go Documentation',
+  },
+  description: 'Go bindings for ZAP - Zero-Copy App Proto for AI agent communication',
+};
 
-export const metadata: Metadata = {
-  title: 'ZAP Go - Go Bindings for Zero-Copy App Proto',
-  description: 'High-performance Cap\'n Proto RPC for AI agents - Go SDK documentation',
-}
-
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans bg-black text-white antialiased`}>
-        {children}
+    <html lang="en" suppressHydrationWarning>
+      <body>
+        <RootProvider>{children}</RootProvider>
       </body>
     </html>
-  )
+  );
 }

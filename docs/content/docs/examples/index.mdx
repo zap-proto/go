@@ -1,0 +1,82 @@
+---
+title: Examples
+description: Complete code examples for ZAP Go
+---
+
+# Examples
+
+This section contains complete, runnable code examples demonstrating various ZAP Go features.
+
+## Available Examples
+
+| Example | Description |
+|---------|-------------|
+| [Basic Client](/docs/examples/basic-client) | Complete client connecting to a ZAP server |
+| [Tool Server](/docs/examples/tool-server) | Full server implementation with tools |
+| [MCP Bridge](/docs/examples/mcp-bridge) | Gateway bridging ZAP to MCP servers |
+
+## Running the Examples
+
+Each example is a standalone Go program. To run:
+
+```bash
+# Create a directory for the example
+mkdir example && cd example
+go mod init example
+
+# Copy the code into main.go
+# (copy from the example page)
+
+# Install dependencies
+go get github.com/zap-protocol/zap-go
+
+# Run
+go run main.go
+```
+
+## Prerequisites
+
+All examples require:
+
+- Go 1.21 or later
+- Network access to a ZAP server (or run the server example first)
+
+## Example Categories
+
+### Clients
+
+- **Basic Client** - Connect, initialize, and call tools
+- **Resource Reader** - Read and process resources
+- **Prompt Generator** - Use prompt templates
+
+### Servers
+
+- **Tool Server** - Expose custom tools
+- **Resource Server** - Serve files and data
+- **Full Server** - Complete server with all capabilities
+
+### Integration
+
+- **MCP Bridge** - Bridge to MCP servers
+- **Multi-Agent** - Coordinate multiple agents
+- **Consensus** - Distributed voting example
+
+## Code Style
+
+All examples follow these conventions:
+
+1. **Explicit error handling** - Every error is checked
+2. **Context usage** - Proper timeout and cancellation
+3. **Clean shutdown** - Defer cleanup functions
+4. **Logging** - Clear log messages for debugging
+5. **Comments** - Explain key concepts
+
+## Contributing Examples
+
+To add a new example:
+
+1. Create a new MDX file in `content/docs/examples/`
+2. Add it to `meta.json`
+3. Include complete, runnable code
+4. Add comments explaining the code
+5. Test that the example compiles and runs
