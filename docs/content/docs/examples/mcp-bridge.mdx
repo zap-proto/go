@@ -37,8 +37,8 @@ import (
     "syscall"
     "time"
 
-    "capnproto.org/go/capnp/v3"
-    "capnproto.org/go/capnp/v3/rpc"
+    "zap.dev/go/zap/v3"
+    "zap.dev/go/zap/v3/rpc"
     zap "github.com/zap-protocol/zap-go"
 )
 
@@ -674,7 +674,7 @@ func main() {
 
             transport := rpc.NewStreamTransport(c)
             rpcServer := rpc.NewConn(transport, &rpc.Options{
-                BootstrapClient: capnp.Client(zap.Gateway_ServerToClient(gateway)),
+                BootstrapClient: zap.Client(zap.Gateway_ServerToClient(gateway)),
             })
 
             <-rpcServer.Done()
