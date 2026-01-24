@@ -25,7 +25,7 @@ The voting process:
 
 ### Schema Types
 
-```capnp
+```protobuf
 struct AgentQueryId {
   hash @0 :Data;  # BLAKE3 hash of query content
 }
@@ -207,7 +207,7 @@ Combine: Combiner aggregates responses into final signature
 
 ### Schema Types
 
-```capnp
+```protobuf
 struct RingtailParams {
   m @0 :UInt16 = 8;                # Matrix rows
   n @1 :UInt16 = 7;                # Matrix columns

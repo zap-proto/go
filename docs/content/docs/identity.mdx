@@ -21,7 +21,7 @@ DIDs provide a standard way to identify agents, verify their authenticity, and m
 
 A DID Document contains the public keys and service endpoints for an identity:
 
-```capnp
+```protobuf
 struct DidDocument {
   context @0 :List(Text);  # JSON-LD context
   id @1 :Text;             # DID subject
