@@ -1,3 +1,5 @@
+//go:build never
+
 // Package zap provides Go bindings for ZAP (Zero-Copy App Proto).
 //
 // ZAP is a high-performance Cap'n Proto RPC protocol for AI agent communication.

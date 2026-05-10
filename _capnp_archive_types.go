@@ -1,3 +1,5 @@
+//go:build never
+
 package zap
 
 import "encoding/json"
