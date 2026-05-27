@@ -1,6 +1,6 @@
 # ZAP Go
 
-> **Docs:** [ZAP Go SDK](https://zap-proto.dev/docs/sdks/go) · part of the [ZAP Protocol](https://zap-proto.io)
+> **Docs:** [ZAP Go SDK](https://zap-proto.dev/docs/sdks/go) · part of the [ZAP Protocol](https://zap-proto.io); also: [Native ZAP RPC](https://zap-proto.dev/docs/protocols/native)
 
 
 Go bindings for **ZAP** (Zero-Copy App Proto) - high-performance Cap'n Proto RPC for AI agents.
