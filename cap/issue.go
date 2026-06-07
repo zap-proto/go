@@ -98,8 +98,8 @@ func Attenuate(parent Cap, holder [32]byte, permissions uint64, caveats []Caveat
 
 // buildCapBytes serializes a capability into the canonical ZAP wire
 // format and signs it. The signed payload is the full ZAP buffer with
-// the 96-byte Sig field zeroed; after signing, the sig is patched into
-// the field in-place. Returns the final wire bytes.
+// the SigSize-byte Sig field zeroed; after signing, the sig is patched
+// into the field in-place. Returns the final wire bytes.
 func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) {
 	// Build each Caveat as its own ZAP-framed sub-message; the canonical
 	// list element is the full ZAP buffer length-prefixed by ListBuilder
@@ -124,7 +124,7 @@ func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) 
 		IssuedAt:    uint64(in.IssuedAt),
 		ExpiresAt:   uint64(in.ExpiresAt),
 		Caveats:     caveatBufs,
-		// Sig left as the zero [96]byte.
+		// Sig left as the zero [SigSize]byte.
 	})
 
 	// Sign the full buffer (with zeroed sig).

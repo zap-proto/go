@@ -14,17 +14,17 @@ Import path: `github.com/zap-proto/go/cap`. Package name: `cap`.
 
 Canonical ZAP framing — 16-byte ZAP header (magic + version + root
 offset + size) followed by the Capability object's fixed section
-(260 bytes: Kind…Sig at the offsets declared in `capabilities.zap`)
-followed by the Caveats list elements (each a full ZAP sub-message
-length-prefixed by `AddObjectBytes`). No "ZCAP" magic; no hand-rolled
-length prefixes. The wire bytes are produced by the generated
-`NewCapabilityView` builder and read by the generated `CapabilityView`
-zero-copy view in `capabilities_zap.go` — `cap.go` is a thin idiomatic
-wrapper exposing the public `Cap` type.
+(3572 bytes at v1.1: Kind…Sig at the offsets declared in
+`capabilities.zap`) followed by the Caveats list elements (each a full
+ZAP sub-message length-prefixed by `AddObjectBytes`). No "ZCAP" magic;
+no hand-rolled length prefixes. The wire bytes are produced by the
+generated `NewCapabilityView` builder and read by the generated
+`CapabilityView` zero-copy view in `capabilities_zap.go` — `cap.go`
+is a thin idiomatic wrapper exposing the public `Cap` type.
 
-Signature scope: the full ZAP buffer with the 96-byte Sig field zeroed.
-`Cap.SignedBytes()` allocates a copy with the sig field zeroed and
-returns that. Schema lives at
+Signature scope: the full ZAP buffer with the SigSize-byte (3408)
+Sig field zeroed. `Cap.SignedBytes()` allocates a copy with the sig
+field zeroed and returns that. Schema lives at
 `github.com/zap-proto/zap-spec/capabilities.zap`.
 
 `capabilities_zap.go` is `go generate`-regenerable:
@@ -47,10 +47,11 @@ zapgen -single -type-suffix=View -out . path/to/capabilities.zap
 
 ## Crypto
 
-Hash: SHA-256 (BLAKE3 in v1.1 — see `Hash32` swap-point comment).
+Hash: SHA-256 (BLAKE3 swap-point planned — see `Hash32` comment).
 Signature: pluggable `Signer` interface. Production plugs ML-DSA-65 from
-`luxfi/crypto/pq/mldsa`; tests use `Ed25519Signer` (64-byte sig padded
-to the 96-byte footer width).
+`luxfi/crypto/pq/mldsa` via `github.com/hanzoai/iam/capauth`; tests use
+the in-package `Ed25519Signer` (64-byte sig padded to the SigSize-byte
+footer width, scheme tag `SchemeEd25519` at `Sig[AlgTagOffset]`).
 
 ## Layout
 

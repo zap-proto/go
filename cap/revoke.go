@@ -15,9 +15,11 @@ import (
 //
 //	[32]byte CapID || uint64 RevokedAt (little-endian)
 //
-// Padded to SigSize in the same shape as cap signatures so the verifier
-// can reuse one signing primitive. The wire encoding uses ZAP framing
-// via the generated RevocationView; this struct is the idiomatic Go
+// The signature occupies the SigSize footer in the same shape as cap
+// signatures (algorithm tag at byte SigSize-1, primitive's bytes at the
+// leading L_scheme bytes, zero pad in between) so the verifier can
+// reuse one signing primitive. The wire encoding uses ZAP framing via
+// the generated RevocationView; this struct is the idiomatic Go
 // container used at the boundaries.
 type Revocation struct {
 	CapID      [32]byte

@@ -18,7 +18,7 @@ const (
 	capabilityViewExpiresAtOff   = 148
 	capabilityViewCaveatsOff     = 156
 	capabilityViewSigOff         = 164
-	capabilityViewSize           = 260
+	capabilityViewSize           = 3572
 )
 
 // CapabilityView is a zero-copy view into a ZAP-encoded CapabilityView message.
@@ -59,9 +59,9 @@ func (t CapabilityView) Parent() [32]byte {
 func (t CapabilityView) IssuedAt() uint64  { return t.o.Uint64(capabilityViewIssuedAtOff) }
 func (t CapabilityView) ExpiresAt() uint64 { return t.o.Uint64(capabilityViewExpiresAtOff) }
 func (t CapabilityView) Caveats() zap.List { return t.o.List(capabilityViewCaveatsOff) }
-func (t CapabilityView) Sig() [96]byte {
-	var out [96]byte
-	copy(out[:], t.o.BytesFixed(capabilityViewSigOff, 96))
+func (t CapabilityView) Sig() [3408]byte {
+	var out [3408]byte
+	copy(out[:], t.o.BytesFixed(capabilityViewSigOff, 3408))
 	return out
 }
 
@@ -76,7 +76,7 @@ type CapabilityViewInput struct {
 	IssuedAt    uint64
 	ExpiresAt   uint64
 	Caveats     [][]byte
-	Sig         [96]byte
+	Sig         [3408]byte
 }
 
 // NewCapabilityView builds a ZAP-encoded CapabilityView message from in and returns the bytes.
@@ -143,7 +143,7 @@ const (
 	revocationViewCapIDOff      = 0
 	revocationViewRevokedAtOff  = 32
 	revocationViewRevokerSigOff = 40
-	revocationViewSize          = 136
+	revocationViewSize          = 3448
 )
 
 // RevocationView is a zero-copy view into a ZAP-encoded RevocationView message.
@@ -165,9 +165,9 @@ func (t RevocationView) CapID() [32]byte {
 	return out
 }
 func (t RevocationView) RevokedAt() uint64 { return t.o.Uint64(revocationViewRevokedAtOff) }
-func (t RevocationView) RevokerSig() [96]byte {
-	var out [96]byte
-	copy(out[:], t.o.BytesFixed(revocationViewRevokerSigOff, 96))
+func (t RevocationView) RevokerSig() [3408]byte {
+	var out [3408]byte
+	copy(out[:], t.o.BytesFixed(revocationViewRevokerSigOff, 3408))
 	return out
 }
 
@@ -175,7 +175,7 @@ func (t RevocationView) RevokerSig() [96]byte {
 type RevocationViewInput struct {
 	CapID      [32]byte
 	RevokedAt  uint64
-	RevokerSig [96]byte
+	RevokerSig [3408]byte
 }
 
 // NewRevocationView builds a ZAP-encoded RevocationView message from in and returns the bytes.

@@ -16,10 +16,11 @@
 // This file is the thin idiomatic-Go wrapper that the IAM/KMS/MPC
 // consumers see: Wrap / Cap.Field / Verifier.
 //
-// Signature scope: the full ZAP buffer with the 96-byte Sig field
-// zeroed. Verifier reconstructs the signing payload by zeroing the sig
-// field in a local copy and verifying the captured Signature() against
-// it. See SPEC.md "Signature scope".
+// Signature scope: the full ZAP buffer with the SigSize-byte Sig field
+// zeroed (SigSize is 3408 bytes at v1.1, wide enough to hold any
+// supported primitive). Verifier reconstructs the signing payload by
+// zeroing the sig field in a local copy and verifying the captured
+// Signature() against it. See SPEC.md "Signature scope".
 package cap
 
 import (
@@ -30,9 +31,51 @@ import (
 	zap "github.com/zap-proto/go"
 )
 
-// SigSize is the fixed signature footer size (ML-DSA-65 placeholder;
-// real ML-DSA-65 sigs are larger and would extend this constant).
-const SigSize = 96
+// SigSize is the fixed signature footer width in bytes. Sized at v1.1 to
+// hold any of:
+//
+//   - secp256k1 ECDSA   (65 bytes)
+//   - Ed25519           (64 bytes)
+//   - ML-DSA-65         (3309 bytes, FIPS 204 §5.2 Level-3)
+//   - hybrid Ed25519+ML-DSA-65 (3373 bytes + 16-byte separator)
+//
+// 3408 is the smallest 16-byte-aligned size that fits FIPS 204 ML-DSA-65
+// (3309 B) with a 99-byte headroom. Schemes shorter than SigSize are
+// zero-padded on the right; verifiers identify the scheme via the
+// algorithm tag in the final byte (Sig[SigSize-1]) and decode the
+// leading L_scheme bytes accordingly. See zap-spec/capabilities.zap and
+// capabilities_kinds.md for the canonical tag table.
+const SigSize = 3408
+
+// AlgTagOffset is the offset of the algorithm-tag byte within the SigSize
+// signature footer. The byte at [SigSize-1] identifies which signature
+// primitive a verifier MUST use; it is part of the signed payload, so a
+// tag flip changes the signature and is caught by verifier mismatch.
+const AlgTagOffset = SigSize - 1
+
+// Scheme is the wire-level signature algorithm tag. The numeric values
+// MUST match capabilities_kinds.md "Wire schemes" table; the byte written
+// at Sig[AlgTagOffset] is one of these constants.
+//
+// Verifiers fail-closed on SchemeReserved and on values not enumerated
+// here. Consumers (e.g. github.com/hanzoai/iam/capauth) re-export a
+// typed alias whose constants reuse these numeric values one-for-one so
+// the wire byte and the typed enum agree.
+type Scheme uint8
+
+const (
+	// SchemeReserved (0x00) MUST NOT appear in valid caps. Verifiers
+	// reject it so a zero-filled / never-initialised footer is caught.
+	SchemeReserved Scheme = 0x00
+	// SchemeSecp256k1 is 65-byte secp256k1 ECDSA (R||S||v).
+	SchemeSecp256k1 Scheme = 0x01
+	// SchemeEd25519 is 64-byte Ed25519 (RFC 8032).
+	SchemeEd25519 Scheme = 0x02
+	// SchemeMLDSA65 is the 3309-byte FIPS 204 Level-3 ML-DSA-65 signature.
+	SchemeMLDSA65 Scheme = 0x03
+	// SchemeHybrid is concatenated Ed25519 || ML-DSA-65 (64 + 3309 = 3373 B).
+	SchemeHybrid Scheme = 0x04
+)
 
 // CapKind enumerates the kinds of authority a capability can confer.
 type CapKind uint32
@@ -90,6 +133,12 @@ var (
 	ErrHolderMismatch  = errors.New("cap: holder does not match")
 	ErrIssuerUnknown   = errors.New("cap: issuer key unknown")
 	ErrCaveatViolation = errors.New("cap: caveat violated")
+	// ErrUnhandledScheme is returned by a Verifier's SchemeVerify hook to
+	// indicate it does not recognise the algorithm-tag byte; the
+	// dispatcher then falls through to its built-in ed25519 path.
+	// Consumers that want strict fail-closed semantics on unknown schemes
+	// should NOT return this and should instead return ErrSigMismatch.
+	ErrUnhandledScheme = errors.New("cap: signature scheme not handled by SchemeVerify")
 )
 
 // Cap is a zero-copy view over a capability buffer. Constructed by Wrap.
