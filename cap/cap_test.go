@@ -494,6 +494,65 @@ func TestCaveatEncodingAllKinds(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// v1.1 wire shape: SigSize is 3408, footer carries algorithm tag.
+// ----------------------------------------------------------------------------
+
+// TestSigSize_V1_1 freezes the wire constant: the v1.1 footer is 3408
+// bytes wide (sized for FIPS 204 ML-DSA-65 + 99-byte headroom, rounded
+// to 16-byte alignment). If this constant ever changes, the wire bumps
+// to v1.2 and every encoder/decoder consumer must update in lockstep.
+func TestSigSize_V1_1(t *testing.T) {
+	if SigSize != 3408 {
+		t.Fatalf("SigSize = %d, want 3408 (v1.1 wire format)", SigSize)
+	}
+	if AlgTagOffset != SigSize-1 {
+		t.Fatalf("AlgTagOffset = %d, want SigSize-1 = %d", AlgTagOffset, SigSize-1)
+	}
+	if capabilityViewSize != 3572 {
+		t.Fatalf("capabilityViewSize = %d, want 3572 (164 + 3408)", capabilityViewSize)
+	}
+	if revocationViewSize != 3448 {
+		t.Fatalf("revocationViewSize = %d, want 3448 (40 + 3408)", revocationViewSize)
+	}
+}
+
+// TestEd25519Signer_WritesAlgTag asserts the Ed25519 stub writes the
+// SchemeEd25519 (0x02) tag at AlgTagOffset of its produced signature.
+// This is the wire contract the verifier dispatches on.
+func TestEd25519Signer_WritesAlgTag(t *testing.T) {
+	signer := mustSigner(t)
+	sig, err := signer.Sign([]byte("test payload"))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if sig[AlgTagOffset] != byte(SchemeEd25519) {
+		t.Errorf("sig[%d] = %#x, want SchemeEd25519 = %#x",
+			AlgTagOffset, sig[AlgTagOffset], byte(SchemeEd25519))
+	}
+}
+
+// TestIssueRoundTrip_AlgTagPersisted asserts that a minted cap's Sig
+// field on the wire carries the algorithm tag byte the Signer set. This
+// closes the loop: signer writes the tag, builder embeds it, view reads
+// it back unchanged.
+func TestIssueRoundTrip_AlgTagPersisted(t *testing.T) {
+	signer := mustSigner(t)
+	c, err := Issue(Issuance{
+		Kind:        uint32(KindIAMSession),
+		Permissions: 0xFF,
+		ExpiresAt:   2000000000,
+	}, signer)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	sig := c.Signature()
+	if sig[AlgTagOffset] != byte(SchemeEd25519) {
+		t.Errorf("on-wire sig[%d] = %#x, want SchemeEd25519 = %#x",
+			AlgTagOffset, sig[AlgTagOffset], byte(SchemeEd25519))
+	}
+}
+
+// ----------------------------------------------------------------------------
 // Framing checks.
 // ----------------------------------------------------------------------------
 

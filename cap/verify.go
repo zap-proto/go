@@ -10,12 +10,47 @@ package cap
 //     A nil func is treated as "nothing revoked".
 //
 //   - IssuerKey resolves an issuer's 32-byte hash back to its raw public
-//     key bytes (ed25519 today; ML-DSA-65 in production). Must return
-//     ErrIssuerUnknown for unknown issuers.
+//     key bytes (ed25519 raw pubkey or ML-DSA-65 FIPS 204 encoding).
+//     Must return ErrIssuerUnknown for unknown issuers.
+//
+//   - SchemeVerify dispatches on the algorithm-tag byte at
+//     sig[AlgTagOffset] to validate the signature under the right
+//     primitive. A nil func defaults to ed25519-only (the bootstrap
+//     scheme); consumers that want ML-DSA-65 or hybrid wire a dispatch
+//     table whose default falls back to the package-private ed25519
+//     path so callers do not need to special-case the bootstrap.
 type Verifier struct {
-	IsRevoked func(capID [32]byte) bool
-	IssuerKey func(issuerHash [32]byte) ([]byte, error)
+	IsRevoked    func(capID [32]byte) bool
+	IssuerKey    func(issuerHash [32]byte) ([]byte, error)
+	SchemeVerify func(scheme Scheme, pub []byte, payload []byte, sig [SigSize]byte) error
 }
+
+// verifySig is the verifier-side dispatcher. It reads the algorithm tag
+// at sig[AlgTagOffset], runs the SchemeVerify hook if set, and falls
+// back to ed25519 (the bootstrap scheme, mandatory-to-implement) when
+// the hook is nil OR returns "scheme not handled".
+//
+// The package keeps the dispatch private so the cap.Verifier surface
+// stays small: callers see a single signature path; the scheme-specific
+// primitive is just a callback they wire when they need PQ.
+func (v Verifier) verifySig(pub []byte, payload []byte, sig [SigSize]byte) error {
+	scheme := Scheme(sig[AlgTagOffset])
+	if v.SchemeVerify != nil {
+		if err := v.SchemeVerify(scheme, pub, payload, sig); err != ErrUnhandledScheme {
+			return err
+		}
+	}
+	// Bootstrap path: ed25519. Untagged buffers (scheme==0) still hit
+	// this fallback because the legacy Ed25519Signer.Sign predated the
+	// tag-byte convention and consumers may still produce zero-tagged
+	// caps during the v1.0→v1.1 transition. Once every consumer writes
+	// the tag, callers MAY wire a SchemeVerify that refuses scheme==0.
+	if scheme == SchemeEd25519 || scheme == SchemeReserved {
+		return verifyEd25519(pub, payload, sig)
+	}
+	return ErrUnhandledScheme
+}
+
 
 // Verify validates a single cap independent of chain context. Checks:
 //
@@ -63,7 +98,7 @@ func (v Verifier) Verify(c Cap, now int64) error {
 	if len(pub) == 0 {
 		return ErrIssuerUnknown
 	}
-	if err := verifyEd25519(pub, c.SignedBytes(), c.Signature()); err != nil {
+	if err := v.verifySig(pub, c.SignedBytes(), c.Signature()); err != nil {
 		return err
 	}
 
