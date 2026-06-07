@@ -10,69 +10,29 @@
 // VerifyChain walks the chain back to a root, checking each signature,
 // the intersection of permissions, expiry, revocation, and caveats.
 //
-// The wire format is a fixed-offset prefix followed by a length-prefixed
-// caveat block and a fixed-size trailing signature, so field reads are
-// O(1) and zero-allocation. Cap.Bytes() returns the raw buffer without
-// copying.
+// Wire format is canonical ZAP — magic+version header, object data,
+// length-prefixed list of Caveat sub-messages. The bytes are produced
+// and read via the generated zero-copy views in capabilities_zap.go.
+// This file is the thin idiomatic-Go wrapper that the IAM/KMS/MPC
+// consumers see: Wrap / Cap.Field / Verifier.
 //
-//	┌───────────────────────────────────────────┐ offset
-//	│ Kind        uint32                        │   0
-//	│ Target      [32]byte                      │   4
-//	│ Holder      [32]byte                      │  36
-//	│ Issuer      [32]byte                      │  68
-//	│ Permissions uint64                        │ 100
-//	│ Parent      [32]byte                      │ 108
-//	│ IssuedAt    uint64                        │ 140
-//	│ ExpiresAt   uint64                        │ 148
-//	│ Magic       [4]byte = "ZCAP"              │ 156
-//	│ NumCaveats  uint32                        │ 160
-//	│ CaveatsLen  uint32                        │ 164
-//	│ Caveats     bytes (CaveatsLen)            │ 168
-//	│ Signature   [96]byte                      │ end - 96
-//	└───────────────────────────────────────────┘
-//
-// Each caveat in the caveats block is encoded as:
-//
-//	uint32 Kind  | uint32 ValueLen | bytes Value
-//
-// The signature covers Bytes()[0 : len(Bytes())-96]. The cap ID is the
-// hash of the full Bytes() including signature; revocation lists key on
-// ID.
+// Signature scope: the full ZAP buffer with the 96-byte Sig field
+// zeroed. Verifier reconstructs the signing payload by zeroing the sig
+// field in a local copy and verifying the captured Signature() against
+// it. See SPEC.md "Signature scope".
 package cap
 
 import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+
+	zap "github.com/zap-proto/go"
 )
 
-// Layout constants. Field offsets within the fixed prefix.
-const (
-	offKind        = 0
-	offTarget      = 4
-	offHolder      = 36
-	offIssuer      = 68
-	offPermissions = 100
-	offParent      = 108
-	offIssuedAt    = 140
-	offExpiresAt   = 148
-	offMagic       = 156
-	offNumCaveats  = 160
-	offCaveatsLen  = 164
-	offCaveats     = 168
-
-	// PrefixSize is the byte length of the fixed prefix (before caveats).
-	PrefixSize = 168
-
-	// SigSize is the fixed signature footer size (ML-DSA-65 placeholder;
-	// real ML-DSA-65 sigs are larger and would extend this constant).
-	SigSize = 96
-)
-
-// Magic identifies a ZAP capability buffer. Distinct from the ZAP
-// message magic ("ZAP\x00") because a cap is a self-contained blob
-// addressable by hash, not a length-framed ZAP message.
-const Magic = "ZCAP"
+// SigSize is the fixed signature footer size (ML-DSA-65 placeholder;
+// real ML-DSA-65 sigs are larger and would extend this constant).
+const SigSize = 96
 
 // CapKind enumerates the kinds of authority a capability can confer.
 type CapKind uint32
@@ -106,7 +66,10 @@ const (
 	CaveatNonceHash CaveatKind = 0x09
 )
 
-// Caveat is one constraint attached to a capability.
+// Caveat is one constraint attached to a capability. Value bytes alias
+// the underlying ZAP buffer when produced via Cap.CaveatAt / Cap.Caveats;
+// callers must not mutate Value in-place. Caveat literals passed into
+// Issue/Attenuate are copied during build.
 type Caveat struct {
 	Kind  CaveatKind
 	Value []byte
@@ -130,156 +93,144 @@ var (
 )
 
 // Cap is a zero-copy view over a capability buffer. Constructed by Wrap.
-// All accessors read directly from raw without allocating.
+// All accessors read directly from raw without allocating; Value slices
+// returned from CaveatAt / Caveats alias the underlying buffer.
 type Cap struct {
-	raw []byte
+	raw  []byte
+	view CapabilityView
 }
 
 // Wrap parses a capability buffer and returns a typed zero-copy view.
-// Validates only the framing — magic + prefix size + caveat block bounds
-// + signature trailer. Cryptographic verification lives in Verifier.
+// Validates ZAP framing (magic, version, size) plus capability-specific
+// structural checks (sig field within bounds). Cryptographic verification
+// lives in Verifier.
 func Wrap(b []byte) (Cap, error) {
-	if len(b) < PrefixSize+SigSize {
+	if len(b) < zap.HeaderSize {
 		return Cap{}, ErrTooShort
 	}
-	if string(b[offMagic:offMagic+4]) != Magic {
-		return Cap{}, ErrBadMagic
+	view, err := WrapCapabilityView(b)
+	if err != nil {
+		// Distinguish "bad magic" from generic short-buffer to keep the
+		// historic error surface stable.
+		if errors.Is(err, zap.ErrInvalidMagic) {
+			return Cap{}, ErrBadMagic
+		}
+		if errors.Is(err, zap.ErrBufferTooSmall) {
+			return Cap{}, ErrTooShort
+		}
+		return Cap{}, err
 	}
-	caveatsLen := binary.LittleEndian.Uint32(b[offCaveatsLen:])
-	if PrefixSize+int(caveatsLen)+SigSize > len(b) {
-		return Cap{}, ErrBadCaveats
+	// Sanity-check that the sig field is within bounds: the sig must
+	// occupy SigSize bytes inside the buffer.
+	if sigAbsOff(b)+SigSize > len(b) {
+		return Cap{}, ErrTooShort
 	}
-	if PrefixSize+int(caveatsLen)+SigSize != len(b) {
-		return Cap{}, ErrBadCaveats
+	c := Cap{raw: b, view: view}
+	// Walk caveats once to catch bad framing up front; expensive paths
+	// (Verify) re-walk via the view, so this is a cheap eager check.
+	list := view.Caveats()
+	for i := 0; i < list.Length(); i++ {
+		if list.BytesAt(i) == nil && list.Length() > 0 {
+			return Cap{}, ErrBadCaveats
+		}
 	}
-	return Cap{raw: b}, nil
+	return c, nil
+}
+
+// sigAbsOff returns the absolute byte offset of the Sig field in raw.
+// The Sig sits at capabilityViewSigOff bytes after the root-object's
+// absolute start. The root-object offset is stored in the ZAP header at
+// bytes [8:12].
+func sigAbsOff(raw []byte) int {
+	root := int(binary.LittleEndian.Uint32(raw[8:12]))
+	return root + capabilityViewSigOff
 }
 
 // Bytes returns the underlying buffer without copying.
 func (c Cap) Bytes() []byte { return c.raw }
 
-// Kind reads the kind field at offset 0.
-func (c Cap) Kind() uint32 {
-	return binary.LittleEndian.Uint32(c.raw[offKind:])
-}
+// Kind reads the kind field.
+func (c Cap) Kind() uint32 { return c.view.Kind() }
 
-// Target reads the 32-byte target hash at offset 4.
-func (c Cap) Target() [32]byte {
-	var out [32]byte
-	copy(out[:], c.raw[offTarget:offTarget+32])
-	return out
-}
+// Target reads the 32-byte target hash.
+func (c Cap) Target() [32]byte { return c.view.Target() }
 
-// Holder reads the 32-byte holder hash at offset 36.
-func (c Cap) Holder() [32]byte {
-	var out [32]byte
-	copy(out[:], c.raw[offHolder:offHolder+32])
-	return out
-}
+// Holder reads the 32-byte holder hash.
+func (c Cap) Holder() [32]byte { return c.view.Holder() }
 
-// Issuer reads the 32-byte issuer hash at offset 68.
-func (c Cap) Issuer() [32]byte {
-	var out [32]byte
-	copy(out[:], c.raw[offIssuer:offIssuer+32])
-	return out
-}
+// Issuer reads the 32-byte issuer hash.
+func (c Cap) Issuer() [32]byte { return c.view.Issuer() }
 
-// Permissions reads the permission bitmask at offset 100.
-func (c Cap) Permissions() uint64 {
-	return binary.LittleEndian.Uint64(c.raw[offPermissions:])
-}
+// Permissions reads the permission bitmask.
+func (c Cap) Permissions() uint64 { return c.view.Permissions() }
 
-// Parent reads the 32-byte parent cap ID at offset 108. Zero means root.
-func (c Cap) Parent() [32]byte {
-	var out [32]byte
-	copy(out[:], c.raw[offParent:offParent+32])
-	return out
-}
+// Parent reads the 32-byte parent cap ID. Zero means root.
+func (c Cap) Parent() [32]byte { return c.view.Parent() }
 
-// IssuedAt reads the unix-second issued-at timestamp at offset 140.
-func (c Cap) IssuedAt() uint64 {
-	return binary.LittleEndian.Uint64(c.raw[offIssuedAt:])
-}
+// IssuedAt reads the unix-second issued-at timestamp.
+func (c Cap) IssuedAt() uint64 { return c.view.IssuedAt() }
 
-// ExpiresAt reads the unix-second expiry at offset 148. Zero means never.
-func (c Cap) ExpiresAt() uint64 {
-	return binary.LittleEndian.Uint64(c.raw[offExpiresAt:])
-}
+// ExpiresAt reads the unix-second expiry. Zero means never.
+func (c Cap) ExpiresAt() uint64 { return c.view.ExpiresAt() }
 
-// NumCaveats returns the caveat count from the prefix header.
-func (c Cap) NumCaveats() int {
-	return int(binary.LittleEndian.Uint32(c.raw[offNumCaveats:]))
-}
-
-// caveatsLen returns the byte length of the caveat block.
-func (c Cap) caveatsLen() int {
-	return int(binary.LittleEndian.Uint32(c.raw[offCaveatsLen:]))
-}
+// NumCaveats returns the number of caveats attached to this cap.
+func (c Cap) NumCaveats() int { return c.view.Caveats().Length() }
 
 // CaveatAt returns the i-th caveat. Out-of-range returns a zero Caveat.
-// The Value slice aliases the underlying buffer; callers must not mutate it.
-// Walks the caveat block from the start each call: O(i). For hot paths
-// iterate via Caveats().
+// The Value slice aliases the underlying buffer; callers must not mutate
+// it. Each call re-walks the variable-element list: O(i).
 func (c Cap) CaveatAt(i int) Caveat {
-	if i < 0 || i >= c.NumCaveats() {
+	list := c.view.Caveats()
+	if i < 0 || i >= list.Length() {
 		return Caveat{}
 	}
-	p := offCaveats
-	end := offCaveats + c.caveatsLen()
-	for k := 0; k < i; k++ {
-		if p+8 > end {
-			return Caveat{}
-		}
-		vlen := int(binary.LittleEndian.Uint32(c.raw[p+4:]))
-		p += 8 + vlen
-	}
-	if p+8 > end {
+	sub := list.ObjectAt(i)
+	if sub.IsNull() {
 		return Caveat{}
 	}
-	kind := CaveatKind(binary.LittleEndian.Uint32(c.raw[p:]))
-	vlen := int(binary.LittleEndian.Uint32(c.raw[p+4:]))
-	if p+8+vlen > end {
-		return Caveat{}
+	return Caveat{
+		Kind:  CaveatKind(sub.Uint32(caveatViewKindOff)),
+		Value: sub.Bytes(caveatViewValueOff),
 	}
-	return Caveat{Kind: kind, Value: c.raw[p+8 : p+8+vlen]}
 }
 
 // Caveats returns the slice of caveats decoded in one walk. Values alias
-// the buffer; do not mutate. Allocates the result slice header only.
+// the buffer; do not mutate.
 func (c Cap) Caveats() []Caveat {
-	n := c.NumCaveats()
+	list := c.view.Caveats()
+	n := list.Length()
 	if n == 0 {
 		return nil
 	}
 	out := make([]Caveat, 0, n)
-	p := offCaveats
-	end := offCaveats + c.caveatsLen()
-	for k := 0; k < n; k++ {
-		if p+8 > end {
+	for i := 0; i < n; i++ {
+		sub := list.ObjectAt(i)
+		if sub.IsNull() {
 			return out
 		}
-		kind := CaveatKind(binary.LittleEndian.Uint32(c.raw[p:]))
-		vlen := int(binary.LittleEndian.Uint32(c.raw[p+4:]))
-		if p+8+vlen > end {
-			return out
-		}
-		out = append(out, Caveat{Kind: kind, Value: c.raw[p+8 : p+8+vlen]})
-		p += 8 + vlen
+		out = append(out, Caveat{
+			Kind:  CaveatKind(sub.Uint32(caveatViewKindOff)),
+			Value: sub.Bytes(caveatViewValueOff),
+		})
 	}
 	return out
 }
 
-// Signature returns the 96-byte trailing signature.
-func (c Cap) Signature() [SigSize]byte {
-	var out [SigSize]byte
-	copy(out[:], c.raw[len(c.raw)-SigSize:])
-	return out
-}
+// Signature returns the 96-byte signature stored in the Sig field.
+func (c Cap) Signature() [SigSize]byte { return c.view.Sig() }
 
-// SignedBytes returns the slice that was hashed and signed: the cap
-// buffer minus the trailing signature. Zero-copy.
+// SignedBytes returns the bytes that were signed when this cap was
+// issued: the full ZAP buffer with the 96-byte Sig field replaced by
+// zeros. Allocates a copy of len(c.raw) bytes — the underlying buffer
+// is not mutated. Used by Verifier and by signers in Issue/Attenuate.
 func (c Cap) SignedBytes() []byte {
-	return c.raw[:len(c.raw)-SigSize]
+	out := make([]byte, len(c.raw))
+	copy(out, c.raw)
+	off := sigAbsOff(out)
+	for i := off; i < off+SigSize && i < len(out); i++ {
+		out[i] = 0
+	}
+	return out
 }
 
 // ID returns the canonical 32-byte identifier of this cap: SHA-256 of

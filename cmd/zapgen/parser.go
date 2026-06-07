@@ -17,10 +17,22 @@ func Parse(filename string, src []byte) (*File, error) {
 		filename: filename,
 		line:     1,
 		file: &File{
+			Source:  filepathBase(filename),
 			Aliases: make(map[string]Type),
 		},
 	}
 	return p.parseFile()
+}
+
+// filepathBase returns the final path element of name. Avoids the import
+// of path/filepath in this file (kept tiny so the parser stays focused).
+func filepathBase(name string) string {
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' || name[i] == '\\' {
+			return name[i+1:]
+		}
+	}
+	return name
 }
 
 type parser struct {

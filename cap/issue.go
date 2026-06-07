@@ -96,43 +96,47 @@ func Attenuate(parent Cap, holder [32]byte, permissions uint64, caveats []Caveat
 	return Wrap(raw)
 }
 
-// buildCapBytes serializes the fixed prefix + caveats block + signature
-// into a single contiguous buffer. The signer is asked to sign the
-// pre-footer bytes; the resulting 96-byte block is appended.
+// buildCapBytes serializes a capability into the canonical ZAP wire
+// format and signs it. The signed payload is the full ZAP buffer with
+// the 96-byte Sig field zeroed; after signing, the sig is patched into
+// the field in-place. Returns the final wire bytes.
 func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) {
-	// First pass: compute caveats block size so we can size the buffer
-	// in one allocation.
-	caveatsLen := 0
-	for _, cv := range in.Caveats {
-		caveatsLen += 8 + len(cv.Value)
-	}
-	total := PrefixSize + caveatsLen + SigSize
-	raw := make([]byte, total)
-
-	binary.LittleEndian.PutUint32(raw[offKind:], in.Kind)
-	copy(raw[offTarget:], in.Target[:])
-	copy(raw[offHolder:], in.Holder[:])
-	copy(raw[offIssuer:], issuer[:])
-	binary.LittleEndian.PutUint64(raw[offPermissions:], in.Permissions)
-	copy(raw[offParent:], in.Parent[:])
-	binary.LittleEndian.PutUint64(raw[offIssuedAt:], uint64(in.IssuedAt))
-	binary.LittleEndian.PutUint64(raw[offExpiresAt:], uint64(in.ExpiresAt))
-	copy(raw[offMagic:], Magic)
-	binary.LittleEndian.PutUint32(raw[offNumCaveats:], uint32(len(in.Caveats)))
-	binary.LittleEndian.PutUint32(raw[offCaveatsLen:], uint32(caveatsLen))
-
-	p := offCaveats
-	for _, cv := range in.Caveats {
-		binary.LittleEndian.PutUint32(raw[p:], uint32(cv.Kind))
-		binary.LittleEndian.PutUint32(raw[p+4:], uint32(len(cv.Value)))
-		copy(raw[p+8:], cv.Value)
-		p += 8 + len(cv.Value)
+	// Build each Caveat as its own ZAP-framed sub-message; the canonical
+	// list element is the full ZAP buffer length-prefixed by ListBuilder
+	// .AddObjectBytes.
+	caveatBufs := make([][]byte, len(in.Caveats))
+	for i, cv := range in.Caveats {
+		caveatBufs[i] = NewCaveatView(CaveatViewInput{
+			Kind:  uint32(cv.Kind),
+			Value: cv.Value,
+		})
 	}
 
-	sig, err := signer.Sign(raw[:total-SigSize])
+	// First pass: build with Sig = zero. The resulting bytes ARE the
+	// signing payload.
+	raw := NewCapabilityView(CapabilityViewInput{
+		Kind:        in.Kind,
+		Target:      in.Target,
+		Holder:      in.Holder,
+		Issuer:      issuer,
+		Permissions: in.Permissions,
+		Parent:      in.Parent,
+		IssuedAt:    uint64(in.IssuedAt),
+		ExpiresAt:   uint64(in.ExpiresAt),
+		Caveats:     caveatBufs,
+		// Sig left as the zero [96]byte.
+	})
+
+	// Sign the full buffer (with zeroed sig).
+	sig, err := signer.Sign(raw)
 	if err != nil {
 		return nil, err
 	}
-	copy(raw[total-SigSize:], sig[:])
+
+	// Patch the sig field in-place. The Sig field sits at
+	// rootOff + capabilityViewSigOff in the final buffer.
+	rootOff := int(binary.LittleEndian.Uint32(raw[8:12]))
+	sigOff := rootOff + capabilityViewSigOff
+	copy(raw[sigOff:sigOff+SigSize], sig[:])
 	return raw, nil
 }

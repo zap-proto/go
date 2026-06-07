@@ -12,6 +12,7 @@ package main
 // File is the parsed contents of one .zap source file.
 type File struct {
 	Package string
+	Source  string          // basename of the input .zap file, for the // source: header
 	Aliases map[string]Type // alias name → resolved type
 	Structs []*Struct
 }
