@@ -192,9 +192,10 @@ func TestVerifyRejectsTamperedBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Flip a permission bit.
+	// Flip a permission bit. The Permissions field sits at
+	// rootOff + capabilityViewPermissionsOff in the ZAP buffer.
 	tampered := append([]byte(nil), c.Bytes()...)
-	tampered[offPermissions] ^= 0x01
+	tampered[fieldAbsOff(tampered, capabilityViewPermissionsOff)] ^= 0x01
 	tc, err := Wrap(tampered)
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +396,7 @@ func TestVerifyChainEmptyChainRequiresRoot(t *testing.T) {
 
 	// Pretend it has a parent; empty chain should now fail.
 	tampered := append([]byte(nil), c.Bytes()...)
-	tampered[offParent] = 0x99
+	tampered[fieldAbsOff(tampered, capabilityViewParentOff)] = 0x99
 	bad, err := Wrap(tampered)
 	if err != nil {
 		t.Fatal(err)
@@ -503,8 +504,9 @@ func TestWrapRejectsShortBuffer(t *testing.T) {
 }
 
 func TestWrapRejectsBadMagic(t *testing.T) {
-	b := make([]byte, PrefixSize+SigSize)
-	// Magic position is unset — should fail.
+	// Buffer big enough to clear the framing length checks but with the
+	// magic field unset — should fail on the magic check.
+	b := make([]byte, 512)
 	if _, err := Wrap(b); !errors.Is(err, ErrBadMagic) {
 		t.Errorf("expected ErrBadMagic, got %v", err)
 	}
@@ -513,11 +515,11 @@ func TestWrapRejectsBadMagic(t *testing.T) {
 func TestWrapRejectsMismatchedCaveatLen(t *testing.T) {
 	signer := mustSigner(t)
 	c, _ := Issue(Issuance{Permissions: 1, ExpiresAt: 2000000000, Caveats: []Caveat{{Kind: CaveatMaxAmount, Value: u64bytes(1)}}}, signer)
-	// Truncate one byte off the end — total length no longer equals
-	// PrefixSize + caveatsLen + SigSize.
+	// Truncate one byte off the end — the ZAP size header now claims
+	// more bytes than are present, so Parse must reject.
 	truncated := c.Bytes()[:len(c.Bytes())-1]
-	if _, err := Wrap(truncated); !errors.Is(err, ErrBadCaveats) {
-		t.Errorf("expected ErrBadCaveats, got %v", err)
+	if _, err := Wrap(truncated); err == nil {
+		t.Errorf("expected error from truncated buffer, got nil")
 	}
 }
 
@@ -540,4 +542,13 @@ func u32pair(a, b uint32) []byte {
 		out[4+i] = byte(b >> (8 * i))
 	}
 	return out
+}
+
+// fieldAbsOff returns the absolute byte offset of a capability field
+// inside the ZAP buffer raw. fieldOff is the offset within the root
+// object (one of the capabilityView*Off constants). Used by tests that
+// tamper with the wire bytes to verify signature rejection.
+func fieldAbsOff(raw []byte, fieldOff int) int {
+	rootOff := int(raw[8]) | int(raw[9])<<8 | int(raw[10])<<16 | int(raw[11])<<24
+	return rootOff + fieldOff
 }

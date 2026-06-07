@@ -90,13 +90,27 @@ type offsetEntry struct {
 }
 
 // StartObject starts building an object with the given data size.
+//
+// The buffer is pre-extended to startPos+dataSize and zero-filled, so the
+// caller can SetX into any field offset within the fixed section in any
+// order, and any subsequent StartList / StartObject / WriteBytes call
+// lays its tail data AFTER the fixed section without colliding with
+// fixed-section fields that haven't been written yet. Without this
+// pre-extension, a list whose pointer field is at a lower offset than a
+// fixed bytes_fixed field would have its element data overwritten by the
+// later SetBytesFixed call.
 func (b *Builder) StartObject(dataSize int) *ObjectBuilder {
 	b.align(Alignment)
-	return &ObjectBuilder{
+	ob := &ObjectBuilder{
 		b:        b,
 		startPos: b.pos,
 		dataSize: dataSize,
 	}
+	// Reserve the full fixed section up front so variable-tail data
+	// (list elements, deferred bytes, nested objects) is appended after
+	// every fixed field, never interleaved with them.
+	ob.ensureField(dataSize)
+	return ob
 }
 
 // SetBool sets a bool field.

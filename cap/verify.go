@@ -19,31 +19,25 @@ type Verifier struct {
 
 // Verify validates a single cap independent of chain context. Checks:
 //
-//   - signature is valid for the cap's Issuer
+//   - signature is valid for the cap's Issuer (signed payload =
+//     the full ZAP buffer with the Sig field zeroed)
 //   - not expired at the supplied now (unix seconds)
 //   - not revoked
-//   - caveat block parses cleanly
+//   - caveat list parses cleanly
 //
 // Returns nil if the cap is acceptable. Note that Verify does NOT walk
 // the parent chain — use VerifyChain for that. A cap that passes Verify
 // is structurally sound but may still be useless if its parent is
 // revoked or its permissions don't include the op being attempted.
 func (v Verifier) Verify(c Cap, now int64) error {
-	// Caveat block sanity: walk it once. NumCaveats and CaveatsLen are
-	// authoritative; if walking blows out the bounds the cap is junk.
-	n := c.NumCaveats()
-	end := offCaveats + c.caveatsLen()
-	p := offCaveats
-	for k := 0; k < n; k++ {
-		if p+8 > end {
+	// Walk the caveat list once to catch bad framing. Each element is a
+	// full ZAP sub-message; ObjectAt returns Object{} on bad bytes.
+	list := c.view.Caveats()
+	for i := 0; i < list.Length(); i++ {
+		sub := list.ObjectAt(i)
+		if sub.IsNull() {
 			return ErrBadCaveats
 		}
-		vlen := int(c.raw[p+4]) | int(c.raw[p+5])<<8 |
-			int(c.raw[p+6])<<16 | int(c.raw[p+7])<<24
-		if p+8+vlen > end {
-			return ErrBadCaveats
-		}
-		p += 8 + vlen
 	}
 
 	// Expiry check. 0 means "never expires".

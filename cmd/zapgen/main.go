@@ -23,6 +23,8 @@ import (
 func main() {
 	var (
 		outDir = flag.String("out", "", "output directory (default: input file's dir)")
+		single = flag.Bool("single", false, "emit one combined <schema>_zap.go instead of per-struct files")
+		suffix = flag.String("type-suffix", "", "append SUFFIX to every generated type name (e.g. -type-suffix=View)")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -33,19 +35,21 @@ func main() {
 	}
 	input := flag.Arg(0)
 
-	if err := run(input, *outDir); err != nil {
+	if err := run(input, *outDir, *single, *suffix); err != nil {
 		fmt.Fprintf(os.Stderr, "zapgen: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: zapgen [-out OUTDIR] SCHEMA.zap")
+	fmt.Fprintln(os.Stderr, "usage: zapgen [-out OUTDIR] [-single] [-type-suffix SUFFIX] SCHEMA.zap")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads a .zap schema and emits one <struct>_zap.go file per struct.")
+	fmt.Fprintln(os.Stderr, "With -single, emits one combined <SCHEMA>_zap.go file.")
+	fmt.Fprintln(os.Stderr, "With -type-suffix, appends SUFFIX to every generated type name.")
 }
 
-func run(input, outDir string) error {
+func run(input, outDir string, single bool, typeSuffix string) error {
 	src, err := os.ReadFile(input)
 	if err != nil {
 		return err
@@ -54,14 +58,39 @@ func run(input, outDir string) error {
 	if err != nil {
 		return err
 	}
-	files, err := Emit(file)
-	if err != nil {
-		return err
+	if typeSuffix != "" {
+		for _, s := range file.Structs {
+			s.Name += typeSuffix
+		}
+		// Patch nested-struct references to the renamed types.
+		for _, s := range file.Structs {
+			for _, f := range s.Fields {
+				if f.Type.Kind == KindStruct {
+					f.Type.StructName += typeSuffix
+				}
+				if f.Type.Kind == KindList && f.Type.ListElem != nil &&
+					f.Type.ListElem.Kind == KindStruct {
+					f.Type.ListElem.StructName += typeSuffix
+				}
+			}
+		}
 	}
 	if outDir == "" {
 		outDir = filepath.Dir(input)
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	if single {
+		name, body, err := EmitSingle(file)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, name)
+		return os.WriteFile(path, body, 0o644)
+	}
+	files, err := Emit(file)
+	if err != nil {
 		return err
 	}
 	for name, body := range files {

@@ -12,12 +12,26 @@ Import path: `github.com/zap-proto/go/cap`. Package name: `cap`.
 
 ## Wire shape
 
-Fixed-offset prefix (168 bytes) + length-prefixed caveat block + 96-byte
-trailing signature. Field offsets are baked in so `Cap` accessors are
-O(1) and zero-allocation. `Cap.Bytes()` returns the raw buffer with no
-copy. `Cap.SignedBytes()` is the slice the signature covers
-(everything but the trailing footer). Schema lives at
+Canonical ZAP framing — 16-byte ZAP header (magic + version + root
+offset + size) followed by the Capability object's fixed section
+(260 bytes: Kind…Sig at the offsets declared in `capabilities.zap`)
+followed by the Caveats list elements (each a full ZAP sub-message
+length-prefixed by `AddObjectBytes`). No "ZCAP" magic; no hand-rolled
+length prefixes. The wire bytes are produced by the generated
+`NewCapabilityView` builder and read by the generated `CapabilityView`
+zero-copy view in `capabilities_zap.go` — `cap.go` is a thin idiomatic
+wrapper exposing the public `Cap` type.
+
+Signature scope: the full ZAP buffer with the 96-byte Sig field zeroed.
+`Cap.SignedBytes()` allocates a copy with the sig field zeroed and
+returns that. Schema lives at
 `github.com/zap-proto/zap-spec/capabilities.zap`.
+
+`capabilities_zap.go` is `go generate`-regenerable:
+
+```
+zapgen -single -type-suffix=View -out . path/to/capabilities.zap
+```
 
 ## API
 
@@ -41,12 +55,14 @@ to the 96-byte footer width).
 ## Layout
 
 ```
-cap.go     Cap zero-copy view + accessors + ID + Hash32
-issue.go   Issuance, Issue, Attenuate, buildCapBytes
-verify.go  Verifier, Verify, VerifyChain
-revoke.go  Revocation, Revoke, VerifyRevocation
-signer.go  Signer interface + Ed25519Signer test stub
-cap_test.go  Round-trip, attenuation, chain walk, revocation, caveat kinds
+capabilities_zap.go  Generated zero-copy views + builders (DO NOT EDIT)
+cap.go               Public Cap wrapper + accessors + ID + Hash32
+issue.go             Issuance, Issue, Attenuate, buildCapBytes
+verify.go            Verifier, Verify, VerifyChain
+revoke.go            Revocation, Revoke, VerifyRevocation,
+                       EncodeRevocation, DecodeRevocation
+signer.go            Signer interface + Ed25519Signer test stub
+cap_test.go          Round-trip, attenuation, chain walk, revocation, caveats
 ```
 
 ## Test
