@@ -1,0 +1,10 @@
+# Build artifacts (anchored to repo root only — don't accidentally
+# match the cmd/zapgen package directory).
+/zapgen
+*.test
+*.out
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
