@@ -8,3 +8,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# zapgen binary built in-package
+cmd/zapgen/zapgen

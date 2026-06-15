@@ -25,6 +25,7 @@ func main() {
 		outDir = flag.String("out", "", "output directory (default: input file's dir)")
 		single = flag.Bool("single", false, "emit one combined <schema>_zap.go instead of per-struct files")
 		suffix = flag.String("type-suffix", "", "append SUFFIX to every generated type name (e.g. -type-suffix=View)")
+		target = flag.String("target", "go", "code target: go | ts")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -35,21 +36,23 @@ func main() {
 	}
 	input := flag.Arg(0)
 
-	if err := run(input, *outDir, *single, *suffix); err != nil {
+	if err := run(input, *outDir, *single, *suffix, *target); err != nil {
 		fmt.Fprintf(os.Stderr, "zapgen: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: zapgen [-out OUTDIR] [-single] [-type-suffix SUFFIX] SCHEMA.zap")
+	fmt.Fprintln(os.Stderr, "usage: zapgen [-out OUTDIR] [-single] [-type-suffix SUFFIX] [-target go|ts] SCHEMA.zap")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads a .zap schema and emits one <struct>_zap.go file per struct.")
 	fmt.Fprintln(os.Stderr, "With -single, emits one combined <SCHEMA>_zap.go file.")
 	fmt.Fprintln(os.Stderr, "With -type-suffix, appends SUFFIX to every generated type name.")
+	fmt.Fprintln(os.Stderr, "With -target=ts, emits one <SCHEMA>_zap.ts file (View + Builder classes")
+	fmt.Fprintln(os.Stderr, "over the @hanzo/zap runtime); the Go emitter is unchanged.")
 }
 
-func run(input, outDir string, single bool, typeSuffix string) error {
+func run(input, outDir string, single bool, typeSuffix, target string) error {
 	src, err := os.ReadFile(input)
 	if err != nil {
 		return err
@@ -80,6 +83,18 @@ func run(input, outDir string, single bool, typeSuffix string) error {
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
+	}
+	switch target {
+	case "go":
+		// fall through to the Go emitter below.
+	case "ts":
+		name, body, err := EmitTS(file)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(outDir, name), body, 0o644)
+	default:
+		return fmt.Errorf("unknown target %q (want go|ts)", target)
 	}
 	if single {
 		name, body, err := EmitSingle(file)
