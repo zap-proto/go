@@ -18,7 +18,7 @@
 //	┌─────────────────────────────────────────────────┐
 //	│ Header (16 bytes)                               │
 //	│  ├─ Magic (4 bytes): "ZAP\x00"                  │
-//	│  ├─ Version (2 bytes): 1                        │
+//	│  ├─ Version (2 bytes): 1 or 2                   │
 //	│  ├─ Flags (2 bytes): compression, etc.          │
 //	│  ├─ Root Offset (4 bytes): offset to root       │
 //	│  └─ Size (4 bytes): total message size          │
@@ -45,8 +45,28 @@ const (
 	// Magic bytes identifying a ZAP message
 	Magic = "ZAP\x00"
 
-	// Version of the ZAP format
-	Version = 1
+	// ZAP wire versions. Two schema generations share the same data-segment
+	// encoding and differ only in the meaning of the leading struct byte:
+	//
+	//   Version1 — original layout (e.g. legacy platformvm v2 schema, where
+	//              byte 0 of the root struct is a payload field).
+	//   Version2 — adds a one-byte discriminator at struct byte 0 (the v3
+	//              platformvm TxKind tag); every later field shifts by +1.
+	//
+	// The reader ACCEPTS both versions (forward-compatible parse); consumers
+	// that require a specific schema generation gate on Message.Version after
+	// Parse. The data segment past the 6-byte magic+version prefix is byte-
+	// identical regardless of version — the version byte is the only header
+	// difference between a v1 and a v2 buffer carrying the same payload.
+	//
+	// Version (the bare constant) is the version this runtime's Builder emits
+	// by default. zap-proto/go is the pure-stdlib baseline runtime and emits
+	// Version1; the hardened downstream runtime (github.com/luxfi/zap) emits
+	// Version2 by default. Both readers accept both — see the cross-wire
+	// conformance test (zap_crosswire_test.go).
+	Version1 uint16 = 1
+	Version2 uint16 = 2
+	Version  uint16 = Version1
 
 	// DefaultPort is the canonical TCP port for ZAP transport. Like 80
 	// means HTTP and 443 means HTTPS, 9999 means ZAP — services that
@@ -80,6 +100,14 @@ type Message struct {
 }
 
 // Parse parses a ZAP message from bytes without copying.
+//
+// Accepts both Version1 and Version2 wire headers (forward-compatible read).
+// Callers that require a specific schema generation gate on Message.Version
+// after Parse.
+//
+// The declared size field must be at least HeaderSize: a size=0 buffer would
+// otherwise pass Parse and then panic on subsequent Root()/Flags() reads
+// against the empty slice. It is rejected at the wire boundary.
 func Parse(data []byte) (*Message, error) {
 	if len(data) < HeaderSize {
 		return nil, ErrBufferTooSmall
@@ -90,19 +118,25 @@ func Parse(data []byte) (*Message, error) {
 		return nil, ErrInvalidMagic
 	}
 
-	// Check version
+	// Check version (accept v1 + v2; reject anything else).
 	version := binary.LittleEndian.Uint16(data[4:6])
-	if version != Version {
+	if version != Version1 && version != Version2 {
 		return nil, ErrInvalidVersion
 	}
 
-	// Validate size
+	// Validate size: must be at least the header (else Root()/Flags() would
+	// panic on data[:size]) and at most the input length.
 	size := binary.LittleEndian.Uint32(data[12:16])
-	if int(size) > len(data) {
+	if int(size) < HeaderSize || int(size) > len(data) {
 		return nil, ErrBufferTooSmall
 	}
 
 	return &Message{data: data[:size]}, nil
+}
+
+// Version returns the wire version of the message (Version1 or Version2).
+func (m *Message) Version() uint16 {
+	return binary.LittleEndian.Uint16(m.data[4:6])
 }
 
 // Bytes returns the underlying byte slice.
@@ -219,14 +253,22 @@ func (o Object) Text(fieldOffset int) string {
 }
 
 // Bytes reads a byte slice at the given field offset (zero-copy).
+//
+// Wire-format rule: relOffset is an UNSIGNED forward pointer from the field
+// position into the variable section. Negative bit-patterns (high bit set)
+// flow through uint32→int conversion as large positive values and are
+// rejected by the absPos+length > len(data) bounds check. This closes the
+// pointer-escape malleability surface where a signed cast would let a crafted
+// relOffset alias bytes back inside the fixed section or the wire header — a
+// Bytes target can never legitimately live in offsets 0..HeaderSize-1.
 func (o Object) Bytes(fieldOffset int) []byte {
 	pos := o.offset + fieldOffset
 	if pos+4 > len(o.msg.data) {
 		return nil
 	}
 
-	// Read offset (relative) and length
-	relOffset := int32(binary.LittleEndian.Uint32(o.msg.data[pos:]))
+	// Read offset (relative, unsigned forward pointer) and length.
+	relOffset := binary.LittleEndian.Uint32(o.msg.data[pos:])
 	if relOffset == 0 {
 		return nil // Null
 	}
@@ -237,9 +279,13 @@ func (o Object) Bytes(fieldOffset int) []byte {
 	}
 	length := binary.LittleEndian.Uint32(o.msg.data[lenPos:])
 
-	// Calculate absolute position
+	// Calculate absolute position. Reject any payload that lands inside the
+	// wire header — Bytes targets cannot live in offsets 0..HeaderSize-1.
 	absPos := pos + int(relOffset)
-	if absPos < 0 || absPos+int(length) > len(o.msg.data) {
+	if absPos < HeaderSize {
+		return nil
+	}
+	if absPos+int(length) > len(o.msg.data) {
 		return nil
 	}
 
@@ -247,6 +293,18 @@ func (o Object) Bytes(fieldOffset int) []byte {
 }
 
 // Object reads a nested object at the given field offset.
+//
+// Wire-format rule: relOffset is SIGNED. The builder may finalize a nested
+// object BEFORE its parent (in which case the nested payload lives EARLIER in
+// the variable section than the parent's pointer cell, and the relOffset is
+// negative). The bounds check rejects any absOffset outside the message; for
+// the Bytes-malleability rule see Bytes().
+//
+// An attacker can use a backward relOffset to alias the WIRE HEADER (offsets
+// 0..HeaderSize-1). The header carries Magic/Version/Flags/RootOffset/Size —
+// none of which is a legitimate object payload. Any absOffset < HeaderSize is
+// rejected. The signed cast still lets honest builders point backward to
+// nested objects they finalized first (which live at offset >= HeaderSize).
 func (o Object) Object(fieldOffset int) Object {
 	pos := o.offset + fieldOffset
 	if pos+4 > len(o.msg.data) {
@@ -259,7 +317,7 @@ func (o Object) Object(fieldOffset int) Object {
 	}
 
 	absOffset := pos + int(relOffset)
-	if absOffset < 0 || absOffset >= len(o.msg.data) {
+	if absOffset < HeaderSize || absOffset >= len(o.msg.data) {
 		return Object{}
 	}
 
@@ -267,6 +325,12 @@ func (o Object) Object(fieldOffset int) Object {
 }
 
 // List reads a list at the given field offset.
+//
+// Wire-format rule: relOffset is SIGNED (see Object()). Any absOffset <
+// HeaderSize is rejected (lists cannot start inside the wire header). The
+// length field is bounded by the total message size — an attacker-set
+// length=0xFFFFFFFF would otherwise let a downstream `for i := 0; i < Len()`
+// loop iterate 4G times even though every per-element accessor returns 0.
 func (o Object) List(fieldOffset int) List {
 	pos := o.offset + fieldOffset
 	if pos+8 > len(o.msg.data) {
@@ -279,9 +343,20 @@ func (o Object) List(fieldOffset int) List {
 	}
 
 	length := binary.LittleEndian.Uint32(o.msg.data[pos+4:])
-	absOffset := pos + int(relOffset)
 
-	if absOffset < 0 || absOffset >= len(o.msg.data) {
+	// Clamp length to the message size. The tightest bound is
+	// length*minElementSize, but element size is per-list-accessor (Uint8 is
+	// 1B, Uint32 is 4B, struct lists carry their own stride). The wire layer
+	// cannot know the stride, so use the permissive `length <= len(data)`
+	// baseline — every per-element accessor re-checks its own bounds. This
+	// rejects the 0xFFFFFFFF DoS without false-rejecting honest 1-byte-stride
+	// lists that span the entire message.
+	if int(length) > len(o.msg.data) {
+		return List{}
+	}
+
+	absOffset := pos + int(relOffset)
+	if absOffset < HeaderSize || absOffset >= len(o.msg.data) {
 		return List{}
 	}
 
