@@ -185,12 +185,18 @@ func (p *parser) parseFile() (*File, error) {
 				return nil, err
 			}
 			p.file.Structs = append(p.file.Structs, s)
+		case p.peekKeyword("interface"):
+			iface, err := p.parseInterface()
+			if err != nil {
+				return nil, err
+			}
+			p.file.Interfaces = append(p.file.Interfaces, iface)
 		case p.peekKeyword("type"):
 			if err := p.parseAlias(); err != nil {
 				return nil, err
 			}
 		default:
-			return nil, p.errf("expected `struct` or `type` at top level")
+			return nil, p.errf("expected `struct`, `interface`, or `type` at top level")
 		}
 	}
 	return p.file, nil
@@ -248,6 +254,104 @@ func (p *parser) parseStruct() (*Struct, error) {
 		}
 		s.Fields = append(s.Fields, f)
 	}
+}
+
+// parseInterface := 'interface' Ident '{' Method* '}'
+//
+// Method ordinals are auto-assigned 1, 2, 3, … in declaration order.
+func (p *parser) parseInterface() (*Interface, error) {
+	p.pos += len("interface")
+	p.skipSpace()
+	name, ok := p.readIdent()
+	if !ok {
+		return nil, p.errf("expected interface name")
+	}
+	p.skipSpace()
+	if err := p.expect("{"); err != nil {
+		return nil, err
+	}
+	iface := &Interface{Name: name}
+	ordinal := 1
+	for {
+		p.skipSpace()
+		if p.pos >= len(p.src) {
+			return nil, p.errf("unterminated interface %q", name)
+		}
+		if p.src[p.pos] == '}' {
+			p.pos++
+			return iface, nil
+		}
+		m, err := p.parseMethod(ordinal)
+		if err != nil {
+			return nil, err
+		}
+		iface.Methods = append(iface.Methods, m)
+		ordinal++
+	}
+}
+
+// parseMethod := Ident '(' Param? ')' ( 'returns' '(' Param? ')' )?
+//
+// Param := Ident ':' Ident   (name : StructTypeName)
+//
+// The request param list and the optional `returns` param list each hold
+// at most one struct param — ZAP method payloads are a single struct.
+func (p *parser) parseMethod(ordinal int) (*Method, error) {
+	name, ok := p.readIdent()
+	if !ok {
+		return nil, p.errf("expected method name")
+	}
+	p.skipSpace()
+	request, err := p.parseParamList()
+	if err != nil {
+		return nil, err
+	}
+	p.skipSpace()
+	var response *Param
+	if p.peekKeyword("returns") {
+		p.pos += len("returns")
+		p.skipSpace()
+		response, err = p.parseParamList()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Method{Name: name, Ordinal: ordinal, Request: request, Response: response}, nil
+}
+
+// parseParamList parses `( name : StructType )` or `()`. Returns nil for
+// the empty list, or an error on more than one param — a ZAP method
+// carries exactly one struct payload per direction.
+func (p *parser) parseParamList() (*Param, error) {
+	if err := p.expect("("); err != nil {
+		return nil, err
+	}
+	p.skipSpace()
+	if p.pos < len(p.src) && p.src[p.pos] == ')' {
+		p.pos++
+		return nil, nil
+	}
+	pname, ok := p.readIdent()
+	if !ok {
+		return nil, p.errf("expected parameter name")
+	}
+	p.skipSpace()
+	if err := p.expect(":"); err != nil {
+		return nil, err
+	}
+	p.skipSpace()
+	tname, ok := p.readIdent()
+	if !ok {
+		return nil, p.errf("expected parameter type")
+	}
+	p.skipSpace()
+	if p.pos < len(p.src) && p.src[p.pos] == ',' {
+		return nil, p.errf("method params carry exactly one struct payload per direction")
+	}
+	if err := p.expect(")"); err != nil {
+		return nil, err
+	}
+	return &Param{Name: pname, StructName: tname}, nil
 }
 
 // parseField := Ident Type '@' Int

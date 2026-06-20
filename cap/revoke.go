@@ -57,12 +57,32 @@ func Revoke(c Cap, now int64, signer Signer) (Revocation, error) {
 	}, nil
 }
 
-// VerifyRevocation checks that r is a valid revocation under issuerPub.
-// The caller is expected to have resolved the original cap's Issuer
-// hash to a public key (via the same IssuerKey lookup the Verifier
-// uses) and then call this with the resolved key.
+// VerifyRevocation checks that r is a valid revocation under issuerPub
+// using the bootstrap scheme dispatch (ed25519 mandatory-to-implement,
+// fail-closed on unknown/reserved tags). The caller is expected to have
+// resolved the original cap's Issuer hash to a public key (via the same
+// IssuerKey lookup the Verifier uses) and then call this with the
+// resolved key.
+//
+// For ML-DSA-65 / hybrid / secp256k1 revocations, use
+// Verifier.VerifyRevocation with a SchemeVerify hook wired — the package
+// function only carries the built-in ed25519 path.
 func VerifyRevocation(r Revocation, issuerPub []byte) error {
-	return verifyEd25519(issuerPub, revocationPayload(r.CapID, r.RevokedAt), r.RevokerSig)
+	return Verifier{}.VerifyRevocation(r, issuerPub)
+}
+
+// VerifyRevocation checks that r is a valid revocation under issuerPub,
+// dispatching on the algorithm tag in r.RevokerSig[AlgTagOffset] exactly
+// as cap signatures do (B4: scheme-aware, not hardcoded ed25519). The
+// dispatch is fail-closed (SPEC §2.3 step 3c): a tag the verifier does
+// not implement, or SchemeReserved (0x00), is rejected. Wire a
+// SchemeVerify hook on the Verifier to accept ML-DSA-65 / hybrid /
+// secp256k1 revocations.
+func (v Verifier) VerifyRevocation(r Revocation, issuerPub []byte) error {
+	if len(issuerPub) == 0 {
+		return ErrIssuerUnknown
+	}
+	return v.verifySig(issuerPub, revocationPayload(r.CapID, r.RevokedAt), r.RevokerSig)
 }
 
 // EncodeRevocation marshals a Revocation into canonical ZAP wire bytes

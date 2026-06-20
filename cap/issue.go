@@ -4,7 +4,6 @@
 package cap
 
 import (
-	"encoding/binary"
 	"errors"
 	"time"
 )
@@ -70,6 +69,14 @@ func Attenuate(parent Cap, holder [32]byte, permissions uint64, caveats []Caveat
 		// stranger mint children, defeating the chain's whole purpose.
 		return Cap{}, ErrChainBroken
 	}
+	// SPEC §7: refuse to build a cap that would fail its own verifier.
+	// The delegation gate (SPEC §2.3 step 3d) requires the parent to
+	// carry PermAttenuate or be a CapKindDelegate cap; mint-time
+	// enforcement means a child that VerifyChain would reject is never
+	// produced in the first place.
+	if parent.Permissions()&PermAttenuate == 0 && CapKind(parent.Kind()) != KindDelegate {
+		return Cap{}, ErrNotDelegable
+	}
 	parentExpiry := parent.ExpiresAt()
 	switch {
 	case expiresAt == 0:
@@ -97,9 +104,11 @@ func Attenuate(parent Cap, holder [32]byte, permissions uint64, caveats []Caveat
 }
 
 // buildCapBytes serializes a capability into the canonical ZAP wire
-// format and signs it. The signed payload is the full ZAP buffer with
-// the SigSize-byte Sig field zeroed; after signing, the sig is patched
-// into the field in-place. Returns the final wire bytes.
+// format and signs it. The signed payload is SPEC §3 canonical bytes
+// (Capability[0..164) || canonical(Caveats)), computed via
+// Cap.CanonicalBytes so signer and verifier share one definition. After
+// signing, the SigSize-byte signature is patched into the Sig field
+// in-place. Returns the final wire bytes.
 func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) {
 	// Build each Caveat as its own ZAP-framed sub-message; the canonical
 	// list element is the full ZAP buffer length-prefixed by ListBuilder
@@ -112,8 +121,9 @@ func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) 
 		})
 	}
 
-	// First pass: build with Sig = zero. The resulting bytes ARE the
-	// signing payload.
+	// First pass: build with Sig = zero. The Sig field's bytes are NOT in
+	// the signing scope (CanonicalBytes covers [0..164) + caveats only),
+	// so the zero placeholder does not affect the signature.
 	raw := NewCapabilityView(CapabilityViewInput{
 		Kind:        in.Kind,
 		Target:      in.Target,
@@ -127,16 +137,21 @@ func buildCapBytes(in Issuance, issuer [32]byte, signer Signer) ([]byte, error) 
 		// Sig left as the zero [SigSize]byte.
 	})
 
-	// Sign the full buffer (with zeroed sig).
-	sig, err := signer.Sign(raw)
+	// Compute the canonical signing bytes from the just-built buffer using
+	// the same code path the verifier uses — no asymmetry between build
+	// and verify (SPEC §7).
+	c, err := Wrap(raw)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := signer.Sign(c.CanonicalBytes())
 	if err != nil {
 		return nil, err
 	}
 
 	// Patch the sig field in-place. The Sig field sits at
 	// rootOff + capabilityViewSigOff in the final buffer.
-	rootOff := int(binary.LittleEndian.Uint32(raw[8:12]))
-	sigOff := rootOff + capabilityViewSigOff
+	sigOff := sigAbsOff(raw)
 	copy(raw[sigOff:sigOff+SigSize], sig[:])
 	return raw, nil
 }

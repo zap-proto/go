@@ -4,6 +4,9 @@
 # The zapgen binary built in-place in its package dir (`go build` with no
 # -o lands here); a compiled artifact, never source.
 /cmd/zapgen/zapgen
+# The agents example binary built in-place at the repo root (go build
+# ./examples/agents with no -o lands here); a compiled artifact.
+/agents
 *.test
 *.out
 

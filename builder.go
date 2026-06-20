@@ -15,8 +15,23 @@ type Builder struct {
 	rootOffset int
 }
 
-// NewBuilder creates a new builder with the given initial capacity.
+// NewBuilder creates a new builder with the given initial capacity. It
+// emits a Version1 header (this runtime's baseline); the data segment is
+// identical across versions, so the choice only sets header byte 4.
 func NewBuilder(capacity int) *Builder {
+	return newBuilder(capacity, Version)
+}
+
+// NewBuilderV2 creates a builder that emits a Version2 header. Version2 is
+// the header the ZAP transport framing (and github.com/luxfi/zap) uses by
+// default; the data segment is byte-identical to Version1. Used by the
+// rpc call envelope so its bytes match the other language runtimes'
+// transport envelopes exactly.
+func NewBuilderV2(capacity int) *Builder {
+	return newBuilder(capacity, Version2)
+}
+
+func newBuilder(capacity int, version uint16) *Builder {
 	if capacity < HeaderSize {
 		capacity = 256
 	}
@@ -26,7 +41,7 @@ func NewBuilder(capacity int) *Builder {
 	}
 	// Write magic and version
 	copy(b.buf[0:4], Magic)
-	binary.LittleEndian.PutUint16(b.buf[4:6], Version)
+	binary.LittleEndian.PutUint16(b.buf[4:6], version)
 	return b
 }
 

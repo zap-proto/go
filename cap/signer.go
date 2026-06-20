@@ -16,10 +16,9 @@ import (
 // scheme tag at sig[AlgTagOffset] before signing so verifiers can
 // dispatch on it.
 //
-// This package only requires the interface; concrete signers live in
-// the runtime's consumers (e.g. github.com/hanzoai/iam/capauth) where
-// the appropriate crypto dependency is wired in. The Ed25519Signer
-// stub below is provided for tests and bootstrap.
+// This package only requires the interface; concrete signers live in a
+// consumer's auth layer where the appropriate crypto dependency is wired
+// in. The Ed25519Signer stub below is provided for tests and bootstrap.
 type Signer interface {
 	// Sign returns a fixed-size signature over the supplied payload.
 	// The signature MUST verify under the Public() key on the verifier
@@ -34,11 +33,6 @@ type Signer interface {
 	Public() [32]byte
 }
 
-// Verifier-side signature checker. The cap package keeps signing and
-// verification symmetric: the same encoding produced by Signer.Sign must
-// be accepted by VerifySig with the resolved pubkey.
-type sigVerifier func(pub []byte, payload []byte, sig [SigSize]byte) error
-
 // ---- ed25519 test stub ----------------------------------------------------
 
 // Ed25519Signer is a Signer backed by an ed25519 key. ed25519's native
@@ -49,8 +43,7 @@ type sigVerifier func(pub []byte, payload []byte, sig [SigSize]byte) error
 // out and ignores the pad and tag byte.
 //
 // This is intended for tests and bootstrap. Production PQ deployments
-// plug an ML-DSA-65 Signer via the runtime's consumer (e.g.
-// github.com/hanzoai/iam/capauth.MLDSA65Signer).
+// plug an ML-DSA-65 Signer via a consumer's auth layer.
 type Ed25519Signer struct {
 	priv ed25519.PrivateKey
 	pub  [32]byte

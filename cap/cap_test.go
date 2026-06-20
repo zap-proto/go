@@ -221,7 +221,7 @@ func TestAttenuateIntersectsPermissions(t *testing.T) {
 		Kind:        uint32(KindATSOrder),
 		Target:      target,
 		Holder:      root.Public(),
-		Permissions: 0b11110000,
+		Permissions: PermAttenuate | 0b11110000,
 		ExpiresAt:   2000000000,
 	}, root)
 	if err != nil {
@@ -275,14 +275,14 @@ func TestAttenuateCapsExpiryDownward(t *testing.T) {
 	root := mustSigner(t)
 	holder := mustSigner(t)
 	parent, err := Issue(Issuance{
-		Permissions: 0xFF,
+		Permissions: PermAttenuate | 0xFF,
 		Holder:      root.Public(),
 		ExpiresAt:   1000,
 	}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaf, err := Attenuate(parent, holder.Public(), 0xFF, nil, 9999, root)
+	leaf, err := Attenuate(parent, holder.Public(), PermAttenuate|0xFF, nil, 9999, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,13 +307,14 @@ func TestVerifyChainHappyPath(t *testing.T) {
 		Kind:        uint32(KindMPCSign),
 		Target:      target,
 		Holder:      root.Public(),
-		Permissions: 0xFF,
+		Permissions: PermAttenuate | 0xFF,
 		ExpiresAt:   2000000000,
 	}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	midCap, err := Attenuate(rootCap, mid.Public(), 0x0F, nil, 0, root)
+	// mid keeps PermAttenuate so it may in turn issue leafCap.
+	midCap, err := Attenuate(rootCap, mid.Public(), PermAttenuate|0x0F, nil, 0, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,8 +338,8 @@ func TestVerifyChainRejectsRevokedParent(t *testing.T) {
 	var target [32]byte
 	target[0] = 0x01
 
-	rootCap, _ := Issue(Issuance{Holder: root.Public(), Target: target, Permissions: 0xFF, ExpiresAt: 2000000000}, root)
-	midCap, _ := Attenuate(rootCap, mid.Public(), 0x0F, nil, 0, root)
+	rootCap, _ := Issue(Issuance{Holder: root.Public(), Target: target, Permissions: PermAttenuate | 0xFF, ExpiresAt: 2000000000}, root)
+	midCap, _ := Attenuate(rootCap, mid.Public(), PermAttenuate|0x0F, nil, 0, root)
 	leafCap, _ := Attenuate(midCap, leaf.Public(), 0x07, nil, 0, mid)
 
 	revoked := midCap.ID()
@@ -360,11 +361,11 @@ func TestVerifyChainRejectsBrokenLink(t *testing.T) {
 	other := mustSigner(t)
 
 	var target [32]byte
-	rootCap, _ := Issue(Issuance{Holder: root.Public(), Target: target, Permissions: 0xFF, ExpiresAt: 2000000000}, root)
-	midCap, _ := Attenuate(rootCap, mid.Public(), 0x0F, nil, 0, root)
+	rootCap, _ := Issue(Issuance{Holder: root.Public(), Target: target, Permissions: PermAttenuate | 0xFF, ExpiresAt: 2000000000}, root)
+	midCap, _ := Attenuate(rootCap, mid.Public(), PermAttenuate|0x0F, nil, 0, root)
 	leafCap, _ := Attenuate(midCap, leaf.Public(), 0x07, nil, 0, mid)
 	// Build an unrelated cap; pass it as the "parent" to break the link.
-	bogus, _ := Issue(Issuance{Holder: other.Public(), Target: target, Permissions: 0xFF, ExpiresAt: 2000000000}, other)
+	bogus, _ := Issue(Issuance{Holder: other.Public(), Target: target, Permissions: PermAttenuate | 0xFF, ExpiresAt: 2000000000}, other)
 
 	v := Verifier{IssuerKey: issuerKeyFn(root, mid, leaf, other)}
 	chain := []Cap{bogus, rootCap}
