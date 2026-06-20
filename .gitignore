@@ -1,6 +1,9 @@
 # Build artifacts (anchored to repo root only — don't accidentally
 # match the cmd/zapgen package directory).
 /zapgen
+# The zapgen binary built in-place in its package dir (`go build` with no
+# -o lands here); a compiled artifact, never source.
+/cmd/zapgen/zapgen
 *.test
 *.out
 

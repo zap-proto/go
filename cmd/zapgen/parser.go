@@ -10,8 +10,15 @@ import (
 	"unicode/utf8"
 )
 
-// Parse parses a .zap source file into a *File.
+// Parse parses a .zap source file into a *File. Whitespace-significant
+// source is desugared into the canonical brace form first (see
+// desugar.go); pure-brace source passes through that step byte-for-byte
+// unchanged, so the brace grammar below is untouched.
 func Parse(filename string, src []byte) (*File, error) {
+	src, err := Desugar(src)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filepathBase(filename), err)
+	}
 	p := &parser{
 		src:      src,
 		filename: filename,
