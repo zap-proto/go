@@ -112,6 +112,17 @@ func (d *desugarer) emit(lines []line, start, end, parentIndent int, cursor *int
 			d.out = append(d.out, indentSpaces(ln.indent)+"}")
 			i = bodyEnd
 		case lineField:
+			// At file scope (no enclosing struct header opened a block) a
+			// "field" line cannot be desugared — there is no offset cursor.
+			// Pass it through verbatim and let the parser report the precise
+			// top-level error (e.g. an unrecognized header `structFoo` or a
+			// bare `struct` followed by an indented body), rather than
+			// crashing here with a misleading "outside a struct". [audit: M1]
+			if cursor == nil {
+				d.out = append(d.out, ln.raw)
+				i++
+				continue
+			}
 			out, err := d.field(ln, cursor)
 			if err != nil {
 				return err
@@ -161,11 +172,10 @@ func braceDelta(raw string) int {
 }
 
 // field rewrites one whitespace-mode field line, assigning or honoring
-// its '@N' byte offset and advancing *cursor.
+// its '@N' byte offset and advancing *cursor. The caller guarantees a
+// non-nil cursor (file-scope field lines are passed through verbatim in
+// emit so the parser can report the precise top-level error). [audit: M1]
 func (d *desugarer) field(ln line, cursor *int) (string, error) {
-	if cursor == nil {
-		return "", fmt.Errorf("field %q outside a struct", ln.body)
-	}
 	name, typ, off, hasOff, err := splitField(ln.body)
 	if err != nil {
 		return "", err
@@ -254,6 +264,15 @@ func indentSpaces(n int) string { return strings.Repeat(" ", n) }
 // already terminated by '{'. In this Go dialect the only block opener is
 // `struct <Id>`; a header already ending in '{' is brace syntax and is
 // left to pass through as lineOther.
+//
+// A braceless header is EXACTLY `struct` + one identifier + end-of-line
+// (after stripping a trailing '#' comment) — the analogue of the TS
+// regex `^(struct|interface)[ \t]+[A-Za-z_]\w*[ \t]*$`. It deliberately
+// does NOT match a field whose NAME is `struct` and that carries a type
+// and/or '@offset' after it (e.g. `struct u8 @0`), nor `structFoo` (no
+// space, one identifier — handled by afterKeyword), nor a brace header
+// `struct S {`. Such lines fall through to isWSField and are desugared
+// as ordinary fields. [audit: H4]
 func isWSHeader(body string) bool {
 	body = stripComment(body)
 	if strings.HasSuffix(body, "{") {
@@ -263,21 +282,47 @@ func isWSHeader(body string) bool {
 	if !ok {
 		return false
 	}
-	// Exactly one identifier may follow `struct`.
+	// Exactly one identifier may follow `struct`, with nothing after it:
+	// `struct S` is a header; `struct u8 @0` (type/offset tail) is a field.
 	id, tail := firstToken(rest)
-	return id != "" && tail == ""
+	return isIdent(id) && tail == ""
 }
 
-// reservedHead names tokens that begin a top-level/structural construct
-// and therefore can never be a field name. Keeps file-scope lines
-// (`package x`, `type x = ...`) and block openers out of the field path.
+// isIdent reports whether s is a single non-empty identifier
+// (`[A-Za-z_]\w*`), matching the parser's identifier grammar.
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '_':
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return false // identifiers cannot start with a digit
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// reservedHead names the one token that begins a file-scope construct
+// (`package x`) and therefore can never be a field name. A real block
+// header `struct X` is already claimed by isWSHeader before classify
+// reaches isWSField, and a top-level alias `type x = …` is excluded by
+// the '=' check below — so `struct`/`interface`/`type`/`enum`/… ARE
+// valid field names (`struct u8 @0`, `interface text @8`, `type u8 @0`)
+// and must classify as fields, not be swallowed as lineOther. [audit: H4]
 var reservedHead = map[string]bool{
-	"package": true, "type": true, "struct": true,
-	"enum": true, "interface": true, "union": true, "group": true,
+	"package": true,
 }
 
 // isWSField reports whether body is a whitespace-mode field declaration:
-// at least `Name Type`, where Name is not a reserved structural keyword.
+// at least `Name Type`, where Name is not a reserved file-scope keyword.
 // Lines containing '{' or '}' or '=' (alias) are not fields.
 func isWSField(body string) bool {
 	if strings.ContainsAny(stripComment(body), "{}=") {
@@ -357,20 +402,39 @@ func splitField(body string) (name, typ string, off int, hasOff bool, err error)
 }
 
 // atoiStrict parses an unsigned decimal integer, rejecting anything else.
+// It guards against overflow: an offset that exceeds maxOffset (or would
+// overflow uint64) is rejected outright rather than silently wrapping —
+// an unchecked accumulator turns @18446744073709551616 into 0, aliasing
+// onto field offset 0 in the zero-copy layout. [audit: H2]
 func atoiStrict(s string) (int, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty integer")
 	}
-	n := 0
+	var n uint64
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < '0' || c > '9' {
 			return 0, fmt.Errorf("not a number: %q", s)
 		}
-		n = n*10 + int(c-'0')
+		d := uint64(c - '0')
+		// Detect uint64 overflow before it happens.
+		if n > (^uint64(0)-d)/10 {
+			return 0, fmt.Errorf("offset %q out of range", s)
+		}
+		n = n*10 + d
 	}
-	return n, nil
+	if n > maxOffset {
+		return 0, fmt.Errorf("offset %q out of range (max %d)", s, maxOffset)
+	}
+	return int(n), nil
 }
+
+// maxOffset bounds a field's declared byte offset. A ZAP struct's
+// fixed section is addressed by these offsets in a zero-copy layout, so
+// an offset far beyond any real message size is a typo, not a layout —
+// rejecting it keeps parsing total (no int overflow, no silent wrap) and
+// fits comfortably in a platform int on 32- and 64-bit builds alike.
+const maxOffset = 1 << 31 // 2 GiB of fixed section — generous, never reached.
 
 // blockExtent returns the index one past the last line belonging to a
 // block whose header sits at headerIndent: the run of following lines
@@ -397,12 +461,25 @@ func blockExtent(lines []line, start, end, headerIndent int) int {
 	return i
 }
 
-// collectAliases scans for `type X = <expr>` lines (outside any struct —
-// they are always at file scope in this dialect) and records the RHS
-// text so field offsets can size aliased types.
+// collectAliases scans for top-level `type X = <expr>` lines and records
+// the RHS text so field offsets can size aliased types. A type alias is
+// ONLY a top-level construct in this dialect (file scope = indent 0 and
+// brace-depth 0), so a struct field literally named `type` (e.g.
+// `type u8 @0`, whether under a whitespace header or inside `{ }`) is NOT
+// scanned as an alias — it stays a field and is sized in the field path.
+// Without this scope guard, collectAliases trips on the missing '=' and
+// crashes the whole desugar before the parser is even reached. [audit: H3]
 func collectAliases(lines []line) (map[string]string, error) {
 	out := map[string]string{}
+	depth := 0 // running brace depth, so brace-form struct bodies are skipped
 	for _, ln := range lines {
+		// A `type` line is a top-level alias only at file scope: not nested
+		// inside a brace block and not indented under a whitespace header.
+		topLevel := depth == 0 && ln.indent == 0
+		depth += braceDelta(ln.raw)
+		if !topLevel {
+			continue
+		}
 		body := stripComment(ln.body)
 		rest, ok := afterKeyword(body, "type")
 		if !ok {
