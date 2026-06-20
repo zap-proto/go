@@ -33,6 +33,38 @@ runtimes implementing that spec.
 definitions in `schema.go` describe the runtime reflection model
 that the generator targets.
 
+### Schema syntax — two equivalent forms, one parser
+
+`.zap` schemas may be written brace-style or whitespace-significant; both
+compile to the same Go. The brace form is canonical and unchanged:
+
+```
+struct BaseTx {
+    NetworkID    u32   @0
+    Memo         bytes @52
+}
+```
+
+The whitespace form drops braces (blocks open by indentation) and may
+drop `@N` byte-offsets (auto-assigned by accumulating each type's slot
+width — `Type.SlotSize()`, the single layout authority):
+
+```
+struct BaseTx
+    NetworkID u32
+    Memo      bytes
+```
+
+`cmd/zapgen/desugar.go` (`Desugar(src) -> braceSrc`) runs BEFORE the
+tokenizer in `Parse`, rewriting the whitespace form into brace source.
+Invariant: a pure-brace file (every header ends `{`, every field carries
+`@N`) round-trips byte-for-byte, so the proven brace parser is untouched
+and styles may mix per top-level decl. An explicit `@N` is always
+preserved and resets the offset cursor. Proven by
+`TestWhitespaceEquivalence` (brace fixture == whitespace twin, identical
+generated Go) and `TestGolden` (brace regression). The whitespace twin
+fixtures live under `cmd/zapgen/testdata/ws/`.
+
 ## Layout
 
 ```
