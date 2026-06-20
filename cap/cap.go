@@ -16,16 +16,19 @@
 // This file is the thin idiomatic-Go wrapper that the IAM/KMS/MPC
 // consumers see: Wrap / Cap.Field / Verifier.
 //
-// Signature scope: the full ZAP buffer with the SigSize-byte Sig field
-// zeroed (SigSize is 3408 bytes at v1.1, wide enough to hold any
-// supported primitive). Verifier reconstructs the signing payload by
-// zeroing the sig field in a local copy and verifying the captured
-// Signature() against it. See SPEC.md "Signature scope".
+// Signature scope: per SPEC.md §3, the signed bytes are the canonical
+// concatenation Capability[0..164) || canonical(Caveats) — the fixed
+// header up to and including the Caveats list pointer, followed by each
+// Caveat encoded as Kind:u32-LE || len(Value):u32-LE || Value in list
+// order. This EXCLUDES the Sig field itself and the ZAP heap-area
+// indirection bytes, and is recomputed identically by signer and
+// verifier (see canonical.go, Cap.CanonicalBytes), so heap layout cannot
+// be tampered with without breaking the signature and the signed bytes
+// are identical across every language runtime.
 package cap
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 
 	zap "github.com/zap-proto/go"
@@ -58,9 +61,9 @@ const AlgTagOffset = SigSize - 1
 // at Sig[AlgTagOffset] is one of these constants.
 //
 // Verifiers fail-closed on SchemeReserved and on values not enumerated
-// here. Consumers (e.g. github.com/hanzoai/iam/capauth) re-export a
-// typed alias whose constants reuse these numeric values one-for-one so
-// the wire byte and the typed enum agree.
+// here. A consumer's auth layer may re-export a typed alias whose
+// constants reuse these numeric values one-for-one so the wire byte and
+// the typed enum agree.
 type Scheme uint8
 
 const (
@@ -76,6 +79,19 @@ const (
 	// SchemeHybrid is concatenated Ed25519 || ML-DSA-65 (64 + 3309 = 3373 B).
 	SchemeHybrid Scheme = 0x04
 )
+
+// known reports whether s is one of the registered signature schemes a
+// verifier may accept. Per SPEC §2.3 step 3c the valid set is exactly
+// {0x01,0x02,0x03,0x04}; SchemeReserved (0x00) and any unassigned tag
+// are NOT known, so verifiers fail-closed on them.
+func (s Scheme) known() bool {
+	switch s {
+	case SchemeSecp256k1, SchemeEd25519, SchemeMLDSA65, SchemeHybrid:
+		return true
+	default:
+		return false
+	}
+}
 
 // CapKind enumerates the kinds of authority a capability can confer.
 type CapKind uint32
@@ -128,17 +144,19 @@ var (
 	ErrRevoked         = errors.New("cap: revoked")
 	ErrChainBroken     = errors.New("cap: chain link broken")
 	ErrPermsExceedPar  = errors.New("cap: permissions exceed parent")
+	ErrNotDelegable    = errors.New("cap: parent does not permit attenuation")
 	ErrOpNotPermitted  = errors.New("cap: op not in permission mask")
 	ErrTargetMismatch  = errors.New("cap: target does not match")
 	ErrHolderMismatch  = errors.New("cap: holder does not match")
 	ErrIssuerUnknown   = errors.New("cap: issuer key unknown")
 	ErrCaveatViolation = errors.New("cap: caveat violated")
-	// ErrUnhandledScheme is returned by a Verifier's SchemeVerify hook to
-	// indicate it does not recognise the algorithm-tag byte; the
-	// dispatcher then falls through to its built-in ed25519 path.
-	// Consumers that want strict fail-closed semantics on unknown schemes
-	// should NOT return this and should instead return ErrSigMismatch.
-	ErrUnhandledScheme = errors.New("cap: signature scheme not handled by SchemeVerify")
+	// ErrUnhandledScheme means the algorithm-tag byte is one the verifier
+	// does not implement (or SchemeReserved / an unknown tag). It is both
+	// the value a SchemeVerify hook returns to decline a tag (so the
+	// dispatcher may try its built-in ed25519 bootstrap path for
+	// SchemeEd25519) AND the terminal error the dispatcher returns when no
+	// path handles the tag — fail-closed per SPEC §2.3 step 3c.
+	ErrUnhandledScheme = errors.New("cap: signature scheme not handled")
 )
 
 // Cap is a zero-copy view over a capability buffer. Constructed by Wrap.
@@ -191,8 +209,7 @@ func Wrap(b []byte) (Cap, error) {
 // absolute start. The root-object offset is stored in the ZAP header at
 // bytes [8:12].
 func sigAbsOff(raw []byte) int {
-	root := int(binary.LittleEndian.Uint32(raw[8:12]))
-	return root + capabilityViewSigOff
+	return capRootOff(raw) + capabilityViewSigOff
 }
 
 // Bytes returns the underlying buffer without copying.
@@ -265,36 +282,28 @@ func (c Cap) Caveats() []Caveat {
 	return out
 }
 
-// Signature returns the 96-byte signature stored in the Sig field.
+// Signature returns the SigSize-byte signature stored in the Sig field.
 func (c Cap) Signature() [SigSize]byte { return c.view.Sig() }
 
-// SignedBytes returns the bytes that were signed when this cap was
-// issued: the full ZAP buffer with the 96-byte Sig field replaced by
-// zeros. Allocates a copy of len(c.raw) bytes — the underlying buffer
-// is not mutated. Used by Verifier and by signers in Issue/Attenuate.
-func (c Cap) SignedBytes() []byte {
-	out := make([]byte, len(c.raw))
-	copy(out, c.raw)
-	off := sigAbsOff(out)
-	for i := off; i < off+SigSize && i < len(out); i++ {
-		out[i] = 0
-	}
-	return out
-}
-
-// ID returns the canonical 32-byte identifier of this cap: SHA-256 of
-// the full buffer (including signature). Revocation records key on ID.
+// ID returns the canonical 32-byte identifier of this cap. Per SPEC.md §4
+// the CapID is Hash32(CanonicalBytes(cap) || Sig) — the exact bytes
+// signed at issue time plus the signature footer. Revocation records key
+// on ID, and the chain walk matches each child's Parent to its parent's
+// ID, so this construction is what binds the chain.
 //
-// BLAKE3 swap-point: replace sha256.Sum256 with blake3.Sum256 in v1.1
-// once luxfi/crypto exposes a stable BLAKE3 entry point. Both are
-// 256-bit; consumers should treat the ID as opaque bytes.
+// BLAKE3 swap-point: replace the SHA-256 in Hash32 with BLAKE3 once
+// luxfi/crypto exposes a stable BLAKE3 entry point. Both are 256-bit;
+// consumers should treat the ID as opaque bytes.
 func (c Cap) ID() [32]byte {
-	return sha256.Sum256(c.raw)
+	sig := c.view.Sig()
+	buf := c.CanonicalBytes()
+	buf = append(buf, sig[:]...)
+	return Hash32(buf)
 }
 
 // Hash32 is the package's canonical 32-byte hash function. Exposed so
 // signers and verifiers agree on the digest construction. SHA-256 today,
-// BLAKE3 in v1.1 (see ID).
+// BLAKE3 in a later revision (see ID).
 func Hash32(b []byte) [32]byte {
 	return sha256.Sum256(b)
 }

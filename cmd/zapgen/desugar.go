@@ -41,9 +41,9 @@ func Desugar(src []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// File scope: no enclosing struct, hence a nil offset cursor.
+	// File scope: no enclosing block.
 	d := &desugarer{aliases: aliases}
-	if err := d.emit(lines, 0, len(lines), -1, nil); err != nil {
+	if err := d.emit(lines, 0, len(lines), -1, blockFile); err != nil {
 		return nil, err
 	}
 	out := strings.Join(d.out, "\n")
@@ -57,10 +57,11 @@ func Desugar(src []byte) ([]byte, error) {
 
 // line is one physical source line plus its derived facts.
 type line struct {
-	raw    string // the line verbatim, no trailing newline
-	indent int    // count of leading spaces (tabs forbidden, see classify)
-	body   string // raw with leading/trailing space trimmed
-	kind   lineKind
+	raw     string // the line verbatim, no trailing newline
+	indent  int    // count of leading spaces (tabs forbidden, see classify)
+	body    string // raw with leading/trailing space trimmed
+	kind    lineKind
+	keyword string // for lineHeader: the opener keyword ("struct" or "interface")
 }
 
 type lineKind uint8
@@ -75,13 +76,26 @@ const (
 type desugarer struct {
 	aliases map[string]string // alias name -> type expression text
 	out     []string
+	err     error // first error from a recursive emitHeader call
 }
 
+// blockMode tags the kind of block emit is walking, which decides how its
+// body lines are treated.
+type blockMode uint8
+
+const (
+	blockFile   blockMode = iota // file scope: no enclosing block
+	blockStruct                  // struct body: fields, offsets auto-assigned
+	blockIface                   // interface body: methods, passed through verbatim
+)
+
 // emit walks a contiguous run of lines, all of which belong to the block
-// whose header sits at parentIndent. cursor (may be nil at file scope)
-// is the byte-offset counter of the enclosing struct; each struct header
-// recurses with a fresh cursor (offsets reset per struct).
-func (d *desugarer) emit(lines []line, start, end, parentIndent int, cursor *int) error {
+// whose header sits at parentIndent. mode is the enclosing block kind; a
+// struct header recurses in blockStruct (with a fresh offset cursor,
+// offsets reset per struct), an interface header recurses in blockIface
+// (method lines pass through unchanged — they carry no @N).
+func (d *desugarer) emit(lines []line, start, end, parentIndent int, mode blockMode) error {
+	var cursor int // struct field offset accumulator (used only in blockStruct)
 	i := start
 	for i < end {
 		ln := lines[i]
@@ -97,44 +111,57 @@ func (d *desugarer) emit(lines []line, start, end, parentIndent int, cursor *int
 			i = d.copyBraceRegion(lines, i, end)
 			continue
 		}
-		switch ln.kind {
-		case lineHeader:
-			// Header opens a whitespace block: append '{', recurse over the
-			// strictly-more-indented body, then close with '}' at this indent.
-			// Strip any trailing comment so the brace lands after the header,
-			// not inside the comment.
-			d.out = append(d.out, indentSpaces(ln.indent)+stripComment(ln.body)+" {")
-			bodyEnd := blockExtent(lines, i+1, end, ln.indent)
-			childCursor := 0
-			if err := d.emit(lines, i+1, bodyEnd, ln.indent, &childCursor); err != nil {
-				return err
+		// A whitespace header opens a sub-block ONLY at file scope. Inside a
+		// struct body the same line (`interface text`) is a field named
+		// `interface`, not a service; inside an interface body it is a
+		// method. So only honor lineHeader when not already inside a block.
+		if ln.kind == lineHeader && mode == blockFile {
+			i = d.emitHeader(lines, i, end, ln)
+			if d.err != nil {
+				return d.err
 			}
-			d.out = append(d.out, indentSpaces(ln.indent)+"}")
-			i = bodyEnd
-		case lineField:
-			// At file scope (no enclosing struct header opened a block) a
-			// "field" line cannot be desugared — there is no offset cursor.
-			// Pass it through verbatim and let the parser report the precise
-			// top-level error (e.g. an unrecognized header `structFoo` or a
-			// bare `struct` followed by an indented body), rather than
-			// crashing here with a misleading "outside a struct". [audit: M1]
-			if cursor == nil {
-				d.out = append(d.out, ln.raw)
-				i++
-				continue
-			}
-			out, err := d.field(ln, cursor)
+			continue
+		}
+		switch mode {
+		case blockStruct:
+			// Every body line is a field; assign or honor its @N offset.
+			out, err := d.field(ln, &cursor)
 			if err != nil {
 				return err
 			}
 			d.out = append(d.out, out)
-			i++
-		default: // lineOther — pass through verbatim (brace syntax, package, alias).
+		default:
+			// File scope or interface body: pass lines through verbatim. At
+			// file scope an un-headered "field"-shaped line is left for the
+			// parser to diagnose precisely (e.g. `structFoo` glued, or a bare
+			// `struct` with a body). [audit: M1] In an interface body, method
+			// lines carry no @N and are handed to the parser as-is.
 			d.out = append(d.out, ln.raw)
-			i++
 		}
+		i++
 	}
 	return nil
+}
+
+// emitHeader opens a whitespace block for the header at lines[i], recurses
+// over its indented body in the matching mode, closes the brace, and
+// returns the index one past the body. Errors are stashed on d.err so the
+// caller's `continue` loop stays simple.
+func (d *desugarer) emitHeader(lines []line, i, end int, ln line) int {
+	// Append '{' after the header (strip any trailing comment so the brace
+	// lands after the header, not inside the comment).
+	d.out = append(d.out, indentSpaces(ln.indent)+stripComment(ln.body)+" {")
+	bodyEnd := blockExtent(lines, i+1, end, ln.indent)
+	bodyMode := blockStruct
+	if ln.keyword == "interface" {
+		bodyMode = blockIface
+	}
+	if err := d.emit(lines, i+1, bodyEnd, ln.indent, bodyMode); err != nil {
+		d.err = err
+		return bodyEnd
+	}
+	d.out = append(d.out, indentSpaces(ln.indent)+"}")
+	return bodyEnd
 }
 
 // copyBraceRegion copies lines verbatim starting at i (which opens at
@@ -236,12 +263,15 @@ func classify(raw string) line {
 	switch {
 	case ln.body == "" || strings.HasPrefix(ln.body, "#"):
 		ln.kind = lineTransparent
-	case isWSHeader(ln.body):
-		ln.kind = lineHeader
-	case isWSField(ln.body):
-		ln.kind = lineField
 	default:
-		ln.kind = lineOther
+		if kw, ok := wsHeaderKeyword(ln.body); ok {
+			ln.kind = lineHeader
+			ln.keyword = kw
+		} else if isWSField(ln.body) {
+			ln.kind = lineField
+		} else {
+			ln.kind = lineOther
+		}
 	}
 	return ln
 }
@@ -259,33 +289,43 @@ func leadingSpaces(raw string) int {
 
 func indentSpaces(n int) string { return strings.Repeat(" ", n) }
 
-// isWSHeader reports whether body is a whitespace-mode block header — a
-// header that, in the brace grammar, would be followed by '{' but is not
-// already terminated by '{'. In this Go dialect the only block opener is
-// `struct <Id>`; a header already ending in '{' is brace syntax and is
-// left to pass through as lineOther.
+// blockOpeners are the keywords that open a whitespace-mode block: a
+// braceless `struct <Id>` or `interface <Id>` header. Struct bodies hold
+// fields (offsets auto-assigned); interface bodies hold methods (passed
+// through verbatim).
+var blockOpeners = []string{"struct", "interface"}
+
+// wsHeaderKeyword reports whether body is a whitespace-mode block header
+// and, if so, which keyword opened it. A header that, in the brace
+// grammar, would be followed by '{' but is not already terminated by '{'.
 //
-// A braceless header is EXACTLY `struct` + one identifier + end-of-line
+// A braceless header is EXACTLY `<opener>` + one identifier + end-of-line
 // (after stripping a trailing '#' comment) — the analogue of the TS
 // regex `^(struct|interface)[ \t]+[A-Za-z_]\w*[ \t]*$`. It deliberately
-// does NOT match a field whose NAME is `struct` and that carries a type
-// and/or '@offset' after it (e.g. `struct u8 @0`), nor `structFoo` (no
-// space, one identifier — handled by afterKeyword), nor a brace header
-// `struct S {`. Such lines fall through to isWSField and are desugared
-// as ordinary fields. [audit: H4]
-func isWSHeader(body string) bool {
+// does NOT match a field whose NAME is `struct`/`interface` and that
+// carries a type and/or '@offset' after it (e.g. `struct u8 @0`), nor
+// `structFoo` (no space, one identifier — handled by afterKeyword), nor a
+// brace header `struct S {`. Such lines fall through to isWSField and are
+// desugared as ordinary fields. [audit: H4]
+func wsHeaderKeyword(body string) (string, bool) {
 	body = stripComment(body)
 	if strings.HasSuffix(body, "{") {
-		return false
+		return "", false
 	}
-	rest, ok := afterKeyword(body, "struct")
-	if !ok {
-		return false
+	for _, kw := range blockOpeners {
+		rest, ok := afterKeyword(body, kw)
+		if !ok {
+			continue
+		}
+		// Exactly one identifier may follow the keyword, with nothing
+		// after it: `struct S` is a header; `struct u8 @0` (type/offset
+		// tail) is a field.
+		id, tail := firstToken(rest)
+		if isIdent(id) && tail == "" {
+			return kw, true
+		}
 	}
-	// Exactly one identifier may follow `struct`, with nothing after it:
-	// `struct S` is a header; `struct u8 @0` (type/offset tail) is a field.
-	id, tail := firstToken(rest)
-	return isIdent(id) && tail == ""
+	return "", false
 }
 
 // isIdent reports whether s is a single non-empty identifier

@@ -4,9 +4,10 @@
 // Package zap implements the Zero-copy Application Protocol (ZAP) runtime.
 //
 // ZAP is a binary serialization format designed for high-performance
-// inter-process and network communication. Like Cap'n Proto and FlatBuffers,
-// ZAP enables zero-copy reads - data can be accessed directly from the
-// underlying byte buffer without parsing or allocation.
+// inter-process and network communication. It uses a fixed-offset layout
+// so reads are zero-copy: every field is accessed directly from the
+// underlying byte buffer at a compile-time offset, with no parse pass and
+// no allocation.
 //
 // This package provides the canonical Go runtime for the ZAP wire format.
 // The specification lives at github.com/zap-proto/zap-spec; code generation

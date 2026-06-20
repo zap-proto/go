@@ -15,10 +15,12 @@ package cap
 //
 //   - SchemeVerify dispatches on the algorithm-tag byte at
 //     sig[AlgTagOffset] to validate the signature under the right
-//     primitive. A nil func defaults to ed25519-only (the bootstrap
-//     scheme); consumers that want ML-DSA-65 or hybrid wire a dispatch
-//     table whose default falls back to the package-private ed25519
-//     path so callers do not need to special-case the bootstrap.
+//     primitive. A nil func means ed25519-only: a SchemeEd25519 tag uses
+//     the built-in bootstrap verifier and every other tag (including
+//     SchemeReserved / unknown) is refused fail-closed. Consumers that
+//     want ML-DSA-65 / hybrid / secp256k1 wire a hook; returning
+//     ErrUnhandledScheme from it for SchemeEd25519 falls back to the
+//     bootstrap path, so callers need not special-case the bootstrap.
 type Verifier struct {
 	IsRevoked    func(capID [32]byte) bool
 	IssuerKey    func(issuerHash [32]byte) ([]byte, error)
@@ -26,36 +28,51 @@ type Verifier struct {
 }
 
 // verifySig is the verifier-side dispatcher. It reads the algorithm tag
-// at sig[AlgTagOffset], runs the SchemeVerify hook if set, and falls
-// back to ed25519 (the bootstrap scheme, mandatory-to-implement) when
-// the hook is nil OR returns "scheme not handled".
+// at sig[AlgTagOffset] and routes to the right primitive, FAIL-CLOSED per
+// SPEC §2.3 step 3c: a verifier MUST refuse any cap whose Sig algorithm
+// tag it does not implement, and MUST refuse SchemeReserved (0x00) — an
+// unset/zero-filled tag is never a valid scheme.
+//
+// Dispatch order:
+//
+//  1. SchemeReserved (0x00) and any tag outside the known set are
+//     rejected immediately with ErrUnhandledScheme. No fallback. This is
+//     the fail-closed gate.
+//  2. If a SchemeVerify hook is wired, it gets first refusal on a known
+//     tag; returning anything other than ErrUnhandledScheme is final
+//     (this is how consumers plug ML-DSA-65 / hybrid / secp256k1).
+//  3. SchemeEd25519 (0x02) falls back to the built-in bootstrap verifier
+//     when the hook is absent or declines it (ed25519 is
+//     mandatory-to-implement). Other known-but-unhooked schemes return
+//     ErrUnhandledScheme — the verifier does not silently downgrade.
 //
 // The package keeps the dispatch private so the cap.Verifier surface
 // stays small: callers see a single signature path; the scheme-specific
 // primitive is just a callback they wire when they need PQ.
 func (v Verifier) verifySig(pub []byte, payload []byte, sig [SigSize]byte) error {
 	scheme := Scheme(sig[AlgTagOffset])
+	if !scheme.known() {
+		// Fail-closed: unknown or reserved (0x00) tag. SPEC §2.3 step 3c.
+		return ErrUnhandledScheme
+	}
 	if v.SchemeVerify != nil {
 		if err := v.SchemeVerify(scheme, pub, payload, sig); err != ErrUnhandledScheme {
 			return err
 		}
 	}
-	// Bootstrap path: ed25519. Untagged buffers (scheme==0) still hit
-	// this fallback because the legacy Ed25519Signer.Sign predated the
-	// tag-byte convention and consumers may still produce zero-tagged
-	// caps during the v1.0→v1.1 transition. Once every consumer writes
-	// the tag, callers MAY wire a SchemeVerify that refuses scheme==0.
-	if scheme == SchemeEd25519 || scheme == SchemeReserved {
+	// Bootstrap path: ed25519 is mandatory-to-implement, so a known
+	// SchemeEd25519 tag verifies here even without a hook. Any other
+	// known scheme the hook declined is unhandled — never downgraded.
+	if scheme == SchemeEd25519 {
 		return verifyEd25519(pub, payload, sig)
 	}
 	return ErrUnhandledScheme
 }
 
-
 // Verify validates a single cap independent of chain context. Checks:
 //
 //   - signature is valid for the cap's Issuer (signed payload =
-//     the full ZAP buffer with the Sig field zeroed)
+//     CanonicalBytes per SPEC §3: Capability[0..164) || canonical(Caveats))
 //   - not expired at the supplied now (unix seconds)
 //   - not revoked
 //   - caveat list parses cleanly
@@ -98,7 +115,7 @@ func (v Verifier) Verify(c Cap, now int64) error {
 	if len(pub) == 0 {
 		return ErrIssuerUnknown
 	}
-	if err := v.verifySig(pub, c.SignedBytes(), c.Signature()); err != nil {
+	if err := v.verifySig(pub, c.CanonicalBytes(), c.Signature()); err != nil {
 		return err
 	}
 
@@ -154,6 +171,14 @@ func (v Verifier) VerifyChain(leaf Cap, chain []Cap, op uint64, target [32]byte,
 		}
 		if prev.Issuer() != link.Holder() {
 			return ErrChainBroken
+		}
+		// Delegation gate (SPEC §2.3 step 3d): the parent must have
+		// actually authorized issuing children off it. A cap may mint a
+		// child only if the parent carries PermAttenuate OR the parent is
+		// itself a CapKindDelegate cap. Without this, any holder of any
+		// cap could mint child caps the issuer never authorized.
+		if link.Permissions()&PermAttenuate == 0 && CapKind(link.Kind()) != KindDelegate {
+			return ErrNotDelegable
 		}
 		// Target must remain identical as authority is attenuated.
 		if link.Target() != target {

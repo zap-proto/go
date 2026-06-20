@@ -10,16 +10,34 @@ external dependencies. Provides the read side (`Parse`, `Message`,
 
 Import path: `github.com/zap-proto/go`. Package name: `zap`.
 
+Three sibling packages ship alongside the root codec:
+
+- `cmd/zapgen` — the schema compiler. Emits per-struct zero-copy
+  View/Builder Go AND, for every `interface` declaration, a typed RPC
+  client + an abstract ordinal-dispatch server contract + a 1-based
+  method-ordinal table. Brace and whitespace-significant DSL, one parser.
+- `rpc` — the ZAP call envelope (`BuildRequest`/`ParseRequest`,
+  `BuildResponse`/`ParseResponse`, `Call`, `Response`, status codes). The
+  wire contract the generated client/server ride; byte-compatible with the
+  other language runtimes' transport envelopes (Version2 header, router
+  msgType flags).
+- `cap` — the capability runtime (Issue/Attenuate/Verify/VerifyChain/
+  Revoke). Signature scope is SPEC §3 canonical bytes
+  (`Capability[0..164) || canonical(Caveats)`, see `cap.CanonicalBytes`);
+  the delegation gate (SPEC §2.3 step 3d), scheme-aware fail-closed
+  signature dispatch, and the cross-cutting Permission bits are enforced.
+
 ## What this is NOT
 
 - Not a network library. Listeners, connections, transport selection,
-  service discovery — all live downstream (e.g. `luxfi/zap`).
+  service discovery — all live downstream (e.g. `luxfi/zap`). The `rpc`
+  package defines the call ENVELOPE (the bytes), not the transport that
+  carries it: the generated client takes a `Channel` the consumer
+  supplies, and the generated server is dispatched by the consumer's
+  read loop. Sockets, framing, and handshakes stay downstream.
 - Not Lux-specific. No `luxfi/*` imports, no EVM types, no
   consensus/handshake/PQ-TLS machinery, no mDNS, no QUIC. Those all
   live in `luxfi/zap` and depend on this runtime.
-- Not a code generator. `cmd/zapgen` (forthcoming) will live here
-  and emit Go from `.zap` schemas — but is not part of this initial
-  skeleton.
 
 ## Where the spec lives
 
@@ -29,9 +47,13 @@ runtimes implementing that spec.
 
 ## Where the codegen lives
 
-`github.com/zap-proto/go/cmd/zapgen` (not yet released). Schema
-definitions in `schema.go` describe the runtime reflection model
-that the generator targets.
+`github.com/zap-proto/go/cmd/zapgen` — shipped and tested. It parses
+`.zap` schemas (brace + whitespace forms, one parser via `desugar.go`)
+and emits Go: per-struct View/Builder, and per-`interface` a typed RPC
+client + abstract dispatch server + 1-based ordinal table over the `rpc`
+envelope. Drop a `//go:generate zapgen schema.zap` line in the consuming
+package; `examples/echo` is a worked end-to-end demo (generated code +
+in-memory client/server round-trip test).
 
 ### Schema syntax — two equivalent forms, one parser
 
@@ -55,6 +77,21 @@ struct BaseTx
     Memo      bytes
 ```
 
+An `interface` declares an RPC service. Method ordinals auto-assign
+`1, 2, 3, …` in declaration order (appending never renumbers), each
+method takes at most one struct request and, after `returns`, at most one
+struct response (either may be empty). `interface` opens a whitespace
+block too — its method lines pass through verbatim (they carry no `@N`):
+
+```
+interface Echo {
+    ping(req: Ping) returns (resp: Pong)
+    notify(req: Ping)
+    health() returns (resp: Pong)
+    shutdown()
+}
+```
+
 `cmd/zapgen/desugar.go` (`Desugar(src) -> braceSrc`) runs BEFORE the
 tokenizer in `Parse`, rewriting the whitespace form into brace source.
 Invariant: a pure-brace file (every header ends `{`, every field carries
@@ -72,8 +109,11 @@ go.mod
 zap.go         Message, Object, List, Parse, Root — read side
 builder.go     Builder, ObjectBuilder, ListBuilder — write side
 schema.go      Type, Struct, Field, Schema, StructBuilder — reflection
+rpc/           Call envelope: BuildRequest/ParseRequest/Build/ParseResponse
+cap/           Capability runtime: Issue/Attenuate/Verify/VerifyChain/Revoke
+cmd/zapgen/    Schema compiler: parser + desugar + struct & interface emit
 *_test.go      Unit tests, fuzzers, benchmarks
-examples/      Self-contained demos using only the runtime
+examples/      Self-contained demos (agents mesh; echo RPC service)
 ```
 
 ## Build & test

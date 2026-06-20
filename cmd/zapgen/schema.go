@@ -11,10 +11,39 @@ package main
 
 // File is the parsed contents of one .zap source file.
 type File struct {
-	Package string
-	Source  string          // basename of the input .zap file, for the // source: header
-	Aliases map[string]Type // alias name → resolved type
-	Structs []*Struct
+	Package    string
+	Source     string          // basename of the input .zap file, for the // source: header
+	Aliases    map[string]Type // alias name → resolved type
+	Structs    []*Struct
+	Interfaces []*Interface
+}
+
+// Interface is one declared RPC service: a named set of methods whose
+// ordinals are auto-assigned 1, 2, 3, … in declaration order.
+type Interface struct {
+	Name    string
+	Methods []*Method
+}
+
+// Method is one service method. Ordinal is the 1-based wire id assigned by
+// declaration order — appending a method never renumbers earlier ones, so
+// an existing method's ordinal is stable for the life of the interface.
+// Request is the inbound struct payload (nil if the param list is empty);
+// Response is the returned struct payload (nil if there is no `returns` or
+// it is empty). A ZAP method carries at most one struct payload per
+// direction.
+type Method struct {
+	Name     string
+	Ordinal  int
+	Request  *Param
+	Response *Param
+}
+
+// Param is one method parameter (`name: StructName`). The type is always a
+// struct name — method payloads are ZAP structs.
+type Param struct {
+	Name       string
+	StructName string
 }
 
 // Struct is one declared struct.
