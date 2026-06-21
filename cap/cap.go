@@ -290,10 +290,6 @@ func (c Cap) Signature() [SigSize]byte { return c.view.Sig() }
 // signed at issue time plus the signature footer. Revocation records key
 // on ID, and the chain walk matches each child's Parent to its parent's
 // ID, so this construction is what binds the chain.
-//
-// BLAKE3 swap-point: replace the SHA-256 in Hash32 with BLAKE3 once
-// luxfi/crypto exposes a stable BLAKE3 entry point. Both are 256-bit;
-// consumers should treat the ID as opaque bytes.
 func (c Cap) ID() [32]byte {
 	sig := c.view.Sig()
 	buf := c.CanonicalBytes()
@@ -302,8 +298,10 @@ func (c Cap) ID() [32]byte {
 }
 
 // Hash32 is the package's canonical 32-byte hash function. Exposed so
-// signers and verifiers agree on the digest construction. SHA-256 today,
-// BLAKE3 in a later revision (see ID).
+// signers and verifiers agree on the digest construction. SHA-256 is the
+// spec-mandated CapID hash (SPEC.md §4): in every target language's stdlib,
+// so cross-language CapIDs are trivially reproducible and the runtime stays
+// zero-dependency. Treat the result as an opaque content identifier.
 func Hash32(b []byte) [32]byte {
 	return sha256.Sum256(b)
 }
