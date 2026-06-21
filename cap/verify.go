@@ -90,6 +90,14 @@ func (v Verifier) Verify(c Cap, now int64) error {
 		if sub.IsNull() {
 			return ErrBadCaveats
 		}
+		// SPEC §2.3 (line 106): verifiers MUST refuse on unknown CaveatKind,
+		// fail-closed. A caveat is a RESTRICTION; an unrecognized one cannot be
+		// evaluated, so accepting the cap would silently ignore a constraint the
+		// issuer intended (a privilege-escalation fail-open). The known kinds are
+		// contiguous 0x00..0x09 (CaveatExpiresAt..CaveatNonceHash).
+		if kind := CaveatKind(sub.Uint32(caveatViewKindOff)); kind > CaveatNonceHash {
+			return ErrUnknownCaveat
+		}
 	}
 
 	// Expiry check. 0 means "never expires".

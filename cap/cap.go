@@ -139,6 +139,7 @@ var (
 	ErrTooShort        = errors.New("cap: buffer too short")
 	ErrBadMagic        = errors.New("cap: bad magic")
 	ErrBadCaveats      = errors.New("cap: caveat block malformed")
+	ErrUnknownCaveat   = errors.New("cap: unknown caveat kind (fail-closed per SPEC §2.3)")
 	ErrSigMismatch     = errors.New("cap: signature does not verify")
 	ErrExpired         = errors.New("cap: expired")
 	ErrRevoked         = errors.New("cap: revoked")
