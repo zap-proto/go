@@ -102,6 +102,53 @@ preserved and resets the offset cursor. Proven by
 generated Go) and `TestGolden` (brace regression). The whitespace twin
 fixtures live under `cmd/zapgen/testdata/ws/`.
 
+## Promise pipelining — the ONE canonical model (Target-based)
+
+The call envelope (`rpc/envelope.go`) has always carried a `Target u32` at
+struct offset 8. That field IS the pipelining mechanism, and `rpc/pipeline.go`
+makes it real on both sides:
+
+- A call carries a caller-assigned `PromiseID` (the id its answer resolves
+  to). A **dependent** call sets `Target = a prior call's PromiseID`, meaning
+  "before you dispatch me, substitute the resolved Body of the call that
+  answered to that PromiseID as my Payload." The result of A is the input to
+  B, so B ships back-to-back with A — no round trip threads A's answer back
+  through the client first.
+- **Client side: `rpc.Session`** allocates unique non-zero PromiseIDs (1, 2,
+  …) and builds Calls: `Origin(p, …)` (Target = `NoTarget`) and
+  `Pipeline(p, target, …)` (Target = `target.ID`).
+- **Server side: `rpc.Pipeliner`** wraps a `Dispatch<Iface>` and is the
+  promise table for one connection: it records every OK answer under its
+  PromiseID, resolves a dependent's `Target` before dispatch, **queues** a
+  dependent whose Target has not resolved yet until it does, and **refuses**
+  (`StatusBadRequest`) a dependent whose Target answered non-OK or was
+  `Finish`ed (so it never hangs). `Finish(id)` bounds the table (the analogue
+  of capnp's Finish).
+
+zapgen emits this directly: the generated `Client` holds a `*rpc.Session`,
+each method `M` is the originating call (Target = `NoTarget`), and `MOn(on
+rpc.Promise)` is the dependent form (Target = `on.ID`, payload supplied
+server-side from `on`'s answer). Both return the call's own `rpc.Promise` so
+chains compose. **`NoTarget` is no longer hardcoded** — it is the value the
+plain form passes through the one shared `invoke<M>(target, payload)` path.
+
+Proven end-to-end by `rpc/pipeline_test.go` (auth→getResource): Target
+resolution in one pass, server-side queuing when the dependent arrives first,
+non-OK and Finished targets refused not hung, and the Target riding on the
+wire byte-for-byte. The TS runtime mirrors this exactly (`@zap-proto/zap`
+`Session`/`Pipeliner` in `js/src/promise.ts`), so a pipeline built on one
+runtime resolves on the other; a non-pipelining peer interoperates by sending
+`Target = NoTarget`.
+
+**Boundary with the Rust stack.** `rust/zap-rpc` implements the full capnp
+Level-1 RPC model: `PromisedAnswer` with a transform *path* of pointer/struct
+ops and an `ImportedCap` union — a strict superset that can pipeline on a
+*field of* an answer, not just the whole answer. That is a richer RPC layer,
+not a competing envelope. The Go/TS Target model and the Rust capnp model
+interoperate at the envelope level for non-pipelined calls (`Target =
+NoTarget`); unifying the capnp transform path into the Go envelope is a
+separate, deliberate superset and is NOT claimed here.
+
 ## Layout
 
 ```
@@ -109,7 +156,8 @@ go.mod
 zap.go         Message, Object, List, Parse, Root — read side
 builder.go     Builder, ObjectBuilder, ListBuilder — write side
 schema.go      Type, Struct, Field, Schema, StructBuilder — reflection
-rpc/           Call envelope: BuildRequest/ParseRequest/Build/ParseResponse
+rpc/           Call envelope (BuildRequest/ParseRequest/Build/ParseResponse)
+               + promise pipelining (Session, Pipeliner) — pipeline.go
 cap/           Capability runtime: Issue/Attenuate/Verify/VerifyChain/Revoke
 cmd/zapgen/    Schema compiler: parser + desugar + struct & interface emit
 *_test.go      Unit tests, fuzzers, benchmarks

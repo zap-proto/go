@@ -70,7 +70,7 @@ func newClient(h *echoHandler) *EchoClient {
 // TestRequestResponse drives the request+response method end-to-end.
 func TestRequestResponse(t *testing.T) {
 	c := newClient(&echoHandler{})
-	body, err := c.Ping(NewPing(PingInput{Seq: 41}))
+	_, body, err := c.Ping(NewPing(PingInput{Seq: 41}))
 	if err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRequestResponse(t *testing.T) {
 func TestVoidReturn(t *testing.T) {
 	h := &echoHandler{}
 	c := newClient(h)
-	if err := c.Notify(NewPing(PingInput{Seq: 7})); err != nil {
+	if _, err := c.Notify(NewPing(PingInput{Seq: 7})); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
 	if h.lastNotify != 7 {
@@ -98,7 +98,7 @@ func TestVoidReturn(t *testing.T) {
 // TestNoRequest drives a response-only (no request param) method.
 func TestNoRequest(t *testing.T) {
 	c := newClient(&echoHandler{})
-	body, err := c.Health()
+	_, body, err := c.Health()
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestNoRequest(t *testing.T) {
 func TestBareMethod(t *testing.T) {
 	h := &echoHandler{}
 	c := newClient(h)
-	if err := c.Shutdown(); err != nil {
+	if _, err := c.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	if !h.stopped {
@@ -123,7 +123,7 @@ func TestBareMethod(t *testing.T) {
 // non-OK status to the client, not a transport error.
 func TestHandlerErrorIsStatusInternal(t *testing.T) {
 	c := newClient(&echoHandler{failPing: true})
-	if _, err := c.Ping(NewPing(PingInput{Seq: 1})); err == nil {
+	if _, _, err := c.Ping(NewPing(PingInput{Seq: 1})); err == nil {
 		t.Errorf("expected error from failing Ping")
 	}
 }
@@ -168,7 +168,7 @@ func TestCapForwarded(t *testing.T) {
 		seen = call.Cap
 	}, h: &echoHandler{}}
 	c := NewEchoClient(ch, want)
-	if _, err := c.Ping(NewPing(PingInput{Seq: 1})); err != nil {
+	if _, _, err := c.Ping(NewPing(PingInput{Seq: 1})); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(seen, want) {

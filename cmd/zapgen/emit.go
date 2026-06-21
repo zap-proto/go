@@ -466,15 +466,18 @@ func emitClient(w *bytes.Buffer, iface *Interface) {
 
 	// Client.
 	fmt.Fprintf(w, "// %sClient is a typed RPC client for the %s service over a ZAP call channel.\n", iface.Name, iface.Name)
+	fmt.Fprintf(w, "// Each call takes a fresh PromiseID from sess; the pipelined \"On\" form of a\n")
+	fmt.Fprintf(w, "// method sets Target to a prior call's Promise so the server chains them.\n")
 	fmt.Fprintf(w, "type %sClient struct {\n", iface.Name)
-	fmt.Fprintf(w, "\tch  %sChannel\n", iface.Name)
-	w.WriteString("\tcap []byte\n")
+	fmt.Fprintf(w, "\tch   %sChannel\n", iface.Name)
+	w.WriteString("\tcap  []byte\n")
+	w.WriteString("\tsess *rpc.Session\n")
 	w.WriteString("}\n\n")
 
 	fmt.Fprintf(w, "// New%sClient returns a client that issues calls over ch, attaching cap\n", iface.Name)
 	w.WriteString("// (which may be nil) to every request.\n")
 	fmt.Fprintf(w, "func New%sClient(ch %sChannel, capability []byte) *%sClient {\n", iface.Name, iface.Name, iface.Name)
-	fmt.Fprintf(w, "\treturn &%sClient{ch: ch, cap: capability}\n", iface.Name)
+	fmt.Fprintf(w, "\treturn &%sClient{ch: ch, cap: capability, sess: rpc.NewSession()}\n", iface.Name)
 	w.WriteString("}\n\n")
 
 	for _, m := range iface.Methods {
@@ -482,33 +485,72 @@ func emitClient(w *bytes.Buffer, iface *Interface) {
 	}
 }
 
+// emitClientMethod emits two forms per method, both over one shared
+// envelope path (no duplicated wire construction):
+//
+//   - M(req) — the originating call: a fresh PromiseID, Target = NoTarget.
+//   - MOn(on rpc.Promise, req) — the dependent call: Target = on.ID, so the
+//     server substitutes on's resolved answer for this call's payload before
+//     dispatch (promise pipelining).
+//
+// Both return the call's own rpc.Promise (so a chain of length > 2 can target
+// the previous link) alongside the method's natural result.
 func emitClientMethod(w *bytes.Buffer, iface *Interface, m *Method) {
 	mname := exportIdent(m.Name)
 	arg, payload := methodArg(m)
-	ret := "error"
+
+	// Result tuple: the originating Promise is always returned first so calls
+	// chain; then ([]byte,)error per the method's response shape.
+	var ret, okReturn, errReturn string
 	if m.Response != nil {
-		ret = "([]byte, error)"
-	}
-	fmt.Fprintf(w, "func (c *%sClient) %s(%s) %s {\n", iface.Name, mname, arg, ret)
-	w.WriteString("\tresp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{\n")
-	fmt.Fprintf(w, "\t\tMethod:  %s,\n", ordinalName(iface, m))
-	w.WriteString("\t\tTarget:  rpc.NoTarget,\n")
-	w.WriteString("\t\tCap:     c.cap,\n")
-	fmt.Fprintf(w, "\t\tPayload: %s,\n", payload)
-	w.WriteString("\t}))\n")
-	if m.Response != nil {
-		w.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
-		w.WriteString("\tif resp.Status != rpc.StatusOK {\n")
-		fmt.Fprintf(w, "\t\treturn nil, fmt.Errorf(\"%s.%s: status %%d\", resp.Status)\n", iface.Name, mname)
-		w.WriteString("\t}\n")
-		w.WriteString("\treturn resp.Body, nil\n")
+		ret = "(rpc.Promise, []byte, error)"
+		okReturn = "\treturn p, resp.Body, nil\n"
+		errReturn = "\t\treturn p, nil, "
 	} else {
-		w.WriteString("\tif err != nil {\n\t\treturn err\n\t}\n")
-		w.WriteString("\tif resp.Status != rpc.StatusOK {\n")
-		fmt.Fprintf(w, "\t\treturn fmt.Errorf(\"%s.%s: status %%d\", resp.Status)\n", iface.Name, mname)
-		w.WriteString("\t}\n")
-		w.WriteString("\treturn nil\n")
+		ret = "(rpc.Promise, error)"
+		okReturn = "\treturn p, nil\n"
+		errReturn = "\t\treturn p, "
 	}
+
+	// Plain form: originating call (Target = NoTarget, own payload).
+	plainArgs := arg
+	fmt.Fprintf(w, "func (c *%sClient) %s(%s) %s {\n", iface.Name, mname, plainArgs, ret)
+	fmt.Fprintf(w, "\treturn c.invoke%s(rpc.NoTarget, %s)\n", mname, payload)
+	w.WriteString("}\n\n")
+
+	// Pipelined form: dependent call (Target = on.ID). Its payload is supplied
+	// server-side by substituting on's resolved answer, so this form takes NO
+	// request param — the upstream result IS the input.
+	fmt.Fprintf(w, "// %sOn issues %s as a dependent call pipelined on the answer of on:\n", mname, mname)
+	fmt.Fprintf(w, "// the server substitutes on's resolved result for this call's payload\n")
+	w.WriteString("// before dispatch, so it ships without waiting for on to round-trip.\n")
+	fmt.Fprintf(w, "func (c *%sClient) %sOn(on rpc.Promise) %s {\n", iface.Name, mname, ret)
+	fmt.Fprintf(w, "\treturn c.invoke%s(on.ID, nil)\n", mname)
+	w.WriteString("}\n\n")
+
+	// Shared envelope path: one place that builds+ships the request. The
+	// payload is nil for a dependent call (target != NoTarget) since the
+	// server substitutes the resolved answer.
+	fmt.Fprintf(w, "func (c *%sClient) invoke%s(target uint32, payload []byte) %s {\n", iface.Name, mname, ret)
+	w.WriteString("\tp := c.sess.Next()\n")
+	w.WriteString("\tresp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{\n")
+	fmt.Fprintf(w, "\t\tMethod:    %s,\n", ordinalName(iface, m))
+	w.WriteString("\t\tPromiseID: p.ID,\n")
+	w.WriteString("\t\tTarget:    target,\n")
+	w.WriteString("\t\tCap:       c.cap,\n")
+	w.WriteString("\t\tPayload:   payload,\n")
+	w.WriteString("\t}))\n")
+	w.WriteString("\tif err != nil {\n")
+	if m.Response != nil {
+		w.WriteString("\t\treturn p, nil, err\n")
+	} else {
+		w.WriteString("\t\treturn p, err\n")
+	}
+	w.WriteString("\t}\n")
+	w.WriteString("\tif resp.Status != rpc.StatusOK {\n")
+	fmt.Fprintf(w, "%sfmt.Errorf(\"%s.%s: status %%d\", resp.Status)\n", errReturn, iface.Name, mname)
+	w.WriteString("\t}\n")
+	w.WriteString(okReturn)
 	w.WriteString("}\n\n")
 }
 

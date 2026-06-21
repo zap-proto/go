@@ -22,79 +22,134 @@ type EchoChannel interface {
 }
 
 // EchoClient is a typed RPC client for the Echo service over a ZAP call channel.
+// Each call takes a fresh PromiseID from sess; the pipelined "On" form of a
+// method sets Target to a prior call's Promise so the server chains them.
 type EchoClient struct {
-	ch  EchoChannel
-	cap []byte
+	ch   EchoChannel
+	cap  []byte
+	sess *rpc.Session
 }
 
 // NewEchoClient returns a client that issues calls over ch, attaching cap
 // (which may be nil) to every request.
 func NewEchoClient(ch EchoChannel, capability []byte) *EchoClient {
-	return &EchoClient{ch: ch, cap: capability}
+	return &EchoClient{ch: ch, cap: capability, sess: rpc.NewSession()}
 }
 
-func (c *EchoClient) Ping(req []byte) ([]byte, error) {
-	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
-		Method:  EchoPingOrdinal,
-		Target:  rpc.NoTarget,
-		Cap:     c.cap,
-		Payload: req,
-	}))
-	if err != nil {
-		return nil, err
-	}
-	if resp.Status != rpc.StatusOK {
-		return nil, fmt.Errorf("Echo.Ping: status %d", resp.Status)
-	}
-	return resp.Body, nil
+func (c *EchoClient) Ping(req []byte) (rpc.Promise, []byte, error) {
+	return c.invokePing(rpc.NoTarget, req)
 }
 
-func (c *EchoClient) Notify(req []byte) error {
-	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
-		Method:  EchoNotifyOrdinal,
-		Target:  rpc.NoTarget,
-		Cap:     c.cap,
-		Payload: req,
-	}))
-	if err != nil {
-		return err
-	}
-	if resp.Status != rpc.StatusOK {
-		return fmt.Errorf("Echo.Notify: status %d", resp.Status)
-	}
-	return nil
+// PingOn issues Ping as a dependent call pipelined on the answer of on:
+// the server substitutes on's resolved result for this call's payload
+// before dispatch, so it ships without waiting for on to round-trip.
+func (c *EchoClient) PingOn(on rpc.Promise) (rpc.Promise, []byte, error) {
+	return c.invokePing(on.ID, nil)
 }
 
-func (c *EchoClient) Health() ([]byte, error) {
+func (c *EchoClient) invokePing(target uint32, payload []byte) (rpc.Promise, []byte, error) {
+	p := c.sess.Next()
 	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
-		Method:  EchoHealthOrdinal,
-		Target:  rpc.NoTarget,
-		Cap:     c.cap,
-		Payload: nil,
+		Method:    EchoPingOrdinal,
+		PromiseID: p.ID,
+		Target:    target,
+		Cap:       c.cap,
+		Payload:   payload,
 	}))
 	if err != nil {
-		return nil, err
+		return p, nil, err
 	}
 	if resp.Status != rpc.StatusOK {
-		return nil, fmt.Errorf("Echo.Health: status %d", resp.Status)
+		return p, nil, fmt.Errorf("Echo.Ping: status %d", resp.Status)
 	}
-	return resp.Body, nil
+	return p, resp.Body, nil
 }
 
-func (c *EchoClient) Shutdown() error {
+func (c *EchoClient) Notify(req []byte) (rpc.Promise, error) {
+	return c.invokeNotify(rpc.NoTarget, req)
+}
+
+// NotifyOn issues Notify as a dependent call pipelined on the answer of on:
+// the server substitutes on's resolved result for this call's payload
+// before dispatch, so it ships without waiting for on to round-trip.
+func (c *EchoClient) NotifyOn(on rpc.Promise) (rpc.Promise, error) {
+	return c.invokeNotify(on.ID, nil)
+}
+
+func (c *EchoClient) invokeNotify(target uint32, payload []byte) (rpc.Promise, error) {
+	p := c.sess.Next()
 	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
-		Method:  EchoShutdownOrdinal,
-		Target:  rpc.NoTarget,
-		Cap:     c.cap,
-		Payload: nil,
+		Method:    EchoNotifyOrdinal,
+		PromiseID: p.ID,
+		Target:    target,
+		Cap:       c.cap,
+		Payload:   payload,
 	}))
 	if err != nil {
-		return err
+		return p, err
 	}
 	if resp.Status != rpc.StatusOK {
-		return fmt.Errorf("Echo.Shutdown: status %d", resp.Status)
+		return p, fmt.Errorf("Echo.Notify: status %d", resp.Status)
 	}
-	return nil
+	return p, nil
+}
+
+func (c *EchoClient) Health() (rpc.Promise, []byte, error) {
+	return c.invokeHealth(rpc.NoTarget, nil)
+}
+
+// HealthOn issues Health as a dependent call pipelined on the answer of on:
+// the server substitutes on's resolved result for this call's payload
+// before dispatch, so it ships without waiting for on to round-trip.
+func (c *EchoClient) HealthOn(on rpc.Promise) (rpc.Promise, []byte, error) {
+	return c.invokeHealth(on.ID, nil)
+}
+
+func (c *EchoClient) invokeHealth(target uint32, payload []byte) (rpc.Promise, []byte, error) {
+	p := c.sess.Next()
+	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
+		Method:    EchoHealthOrdinal,
+		PromiseID: p.ID,
+		Target:    target,
+		Cap:       c.cap,
+		Payload:   payload,
+	}))
+	if err != nil {
+		return p, nil, err
+	}
+	if resp.Status != rpc.StatusOK {
+		return p, nil, fmt.Errorf("Echo.Health: status %d", resp.Status)
+	}
+	return p, resp.Body, nil
+}
+
+func (c *EchoClient) Shutdown() (rpc.Promise, error) {
+	return c.invokeShutdown(rpc.NoTarget, nil)
+}
+
+// ShutdownOn issues Shutdown as a dependent call pipelined on the answer of on:
+// the server substitutes on's resolved result for this call's payload
+// before dispatch, so it ships without waiting for on to round-trip.
+func (c *EchoClient) ShutdownOn(on rpc.Promise) (rpc.Promise, error) {
+	return c.invokeShutdown(on.ID, nil)
+}
+
+func (c *EchoClient) invokeShutdown(target uint32, payload []byte) (rpc.Promise, error) {
+	p := c.sess.Next()
+	resp, err := c.ch.Call(rpc.BuildRequest(rpc.Call{
+		Method:    EchoShutdownOrdinal,
+		PromiseID: p.ID,
+		Target:    target,
+		Cap:       c.cap,
+		Payload:   payload,
+	}))
+	if err != nil {
+		return p, err
+	}
+	if resp.Status != rpc.StatusOK {
+		return p, fmt.Errorf("Echo.Shutdown: status %d", resp.Status)
+	}
+	return p, nil
 }
 
 // EchoHandler is the server contract for the Echo service. Implement each
