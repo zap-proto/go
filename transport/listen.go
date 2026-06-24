@@ -15,6 +15,7 @@ import (
 type Server struct {
 	ln       net.Listener
 	dispatch Dispatch
+	stream   StreamHandler // optional server-side stream dispatch
 
 	mu     sync.Mutex
 	conns  map[*Conn]struct{}
@@ -56,6 +57,27 @@ func Serve(ln net.Listener, dispatch Dispatch) *Server {
 	return s
 }
 
+// ListenStream is [Listen] for services with streaming RPCs: dispatch serves
+// the unary methods and stream serves the streaming ones (either may be
+// nil). Every accepted connection gets both, set before its read loop runs.
+func ListenStream(network, addr string, dispatch Dispatch, stream StreamHandler) (*Server, error) {
+	if network == "unix" {
+		_ = removeIfSocket(addr)
+	}
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		ln:       ln,
+		dispatch: dispatch,
+		stream:   stream,
+		conns:    make(map[*Conn]struct{}),
+	}
+	go s.acceptLoop()
+	return s, nil
+}
+
 // Addr is the listener's network address (useful with ":0" / a temp socket).
 func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
@@ -65,7 +87,7 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		conn := NewConn(nc, s.dispatch)
+		conn := newConn(nc, s.dispatch, s.stream)
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()

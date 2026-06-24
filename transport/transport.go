@@ -53,6 +53,15 @@ import (
 const (
 	dirRequest  byte = 1
 	dirResponse byte = 2
+	// Streaming frames. A stream is identified by the opener's PromiseID
+	// (streamID). Open carries an rpc request envelope (method + initial
+	// payload, PromiseID = streamID); Msg/End carry a 4-byte streamID
+	// prefix then the body. Either end may send Msg until it sends End
+	// (half-close), so the same three frames serve server-, client-, and
+	// bidirectional streaming.
+	dirStreamOpen byte = 3
+	dirStreamMsg  byte = 4
+	dirStreamEnd  byte = 5
 )
 
 // maxFrame bounds a single envelope so a hostile or corrupt length prefix
@@ -92,6 +101,10 @@ type Conn struct {
 	pendMu  sync.Mutex
 	pending map[uint32]chan rpc.Response
 
+	streamMu      sync.Mutex
+	streams       map[uint32]*Stream // active streams by streamID
+	streamHandler StreamHandler      // server-side stream dispatch (nil = none)
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -101,11 +114,19 @@ type Conn struct {
 // read loop. dispatch may be nil for a call-only endpoint. The returned Conn
 // owns nc and closes it on [Conn.Close] or peer EOF.
 func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) *Conn {
+	return newConn(nc, dispatch, nil)
+}
+
+// newConn is the full constructor; the streamHandler is set BEFORE the read
+// loop starts so an immediate inbound stream-open is never dropped.
+func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
 	c := &Conn{
-		nc:       nc,
-		dispatch: dispatch,
-		pending:  make(map[uint32]chan rpc.Response),
-		closed:   make(chan struct{}),
+		nc:            nc,
+		dispatch:      dispatch,
+		streamHandler: sh,
+		pending:       make(map[uint32]chan rpc.Response),
+		streams:       make(map[uint32]*Stream),
+		closed:        make(chan struct{}),
 	}
 	go c.readLoop()
 	return c
@@ -235,6 +256,10 @@ func (c *Conn) readLoop() {
 			env := make([]byte, len(body))
 			copy(env, body)
 			go c.serve(env)
+		case dirStreamOpen, dirStreamMsg, dirStreamEnd:
+			b := make([]byte, len(body)) // hand a stable copy to the stream
+			copy(b, body)
+			c.routeStream(dir, b)
 		}
 	}
 }
