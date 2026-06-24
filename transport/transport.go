@@ -70,6 +70,13 @@ const (
 // chunk-bounded well under this).
 const maxFrame = 64 << 20
 
+// maxInFlight bounds the inbound requests dispatched concurrently on one
+// connection. Without it, a peer pipelining N request frames spawns N
+// goroutines (and N handler runs) at once — a single-socket
+// resource-exhaustion amplifier. At the cap the read loop blocks (TCP
+// backpressure) until a slot frees, so memory and goroutines stay bounded.
+const maxInFlight = 256
+
 // ErrClosed is returned by [Conn.Call] when the connection is shut down
 // (locally via [Conn.Close] or by the peer) before the response arrives.
 var ErrClosed = errors.New("transport: connection closed")
@@ -105,6 +112,8 @@ type Conn struct {
 	streams       map[uint32]*Stream // active streams by streamID
 	streamHandler StreamHandler      // server-side stream dispatch (nil = none)
 
+	sem chan struct{} // bounds concurrent inbound dispatches (backpressure)
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -126,6 +135,7 @@ func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
 		streamHandler: sh,
 		pending:       make(map[uint32]chan rpc.Response),
 		streams:       make(map[uint32]*Stream),
+		sem:           make(chan struct{}, maxInFlight),
 		closed:        make(chan struct{}),
 	}
 	go c.readLoop()
@@ -219,6 +229,18 @@ func (c *Conn) CallContext(ctx context.Context, envelope []byte) (rpc.Response, 
 // callers that build envelopes directly.
 func (c *Conn) NextPromiseID() uint32 { return c.promiseID.Add(1) }
 
+// IsClosed reports whether the connection has been torn down — either
+// locally via [Conn.Close] or by the peer / a read error closing the read
+// loop. A connection-pool keeper uses it to evict and redial dead entries.
+func (c *Conn) IsClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 // Close shuts the connection and fails every in-flight Call with ErrClosed.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
@@ -255,7 +277,16 @@ func (c *Conn) readLoop() {
 			// and dispatch runs on its own goroutine.
 			env := make([]byte, len(body))
 			copy(env, body)
-			go c.serve(env)
+			// Acquire an in-flight slot before spawning. When maxInFlight are
+			// already running the read loop blocks here, applying backpressure
+			// to the peer instead of spawning unbounded goroutines. serve
+			// releases the slot.
+			select {
+			case c.sem <- struct{}{}:
+				go c.serve(env)
+			case <-c.closed:
+				return
+			}
 		case dirStreamOpen, dirStreamMsg, dirStreamEnd:
 			b := make([]byte, len(body)) // hand a stable copy to the stream
 			copy(b, body)
@@ -268,6 +299,7 @@ func (c *Conn) readLoop() {
 // (protocol) error still yields a StatusInternal response so the caller's
 // Call never hangs.
 func (c *Conn) serve(envelope []byte) {
+	defer func() { <-c.sem }() // release the in-flight slot acquired by readLoop
 	respBytes, err := c.dispatch(envelope)
 	if err != nil {
 		// Best-effort: answer the PromiseID with StatusInternal so the peer
