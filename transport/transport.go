@@ -82,7 +82,7 @@ type Channel interface {
 // loop that delivers inbound responses to waiting [Conn.Call]s and, when a
 // Dispatch was supplied, serves inbound requests. Safe for concurrent use.
 type Conn struct {
-	nc       net.Conn
+	nc       io.ReadWriteCloser // *net.TCPConn / *tls.Conn / quic stream
 	dispatch Dispatch
 
 	wmu sync.Mutex // serialises frame writes (one writer at a time)
@@ -96,10 +96,11 @@ type Conn struct {
 	closed    chan struct{}
 }
 
-// NewConn wraps an established net.Conn and starts its read loop. dispatch
-// may be nil for a call-only endpoint. The returned Conn owns nc and closes
-// it on [Conn.Close] or peer EOF.
-func NewConn(nc net.Conn, dispatch Dispatch) *Conn {
+// NewConn wraps an established stream (a *net.TCPConn / Unix conn, a
+// *tls.Conn, or a QUIC stream — anything io.ReadWriteCloser) and starts its
+// read loop. dispatch may be nil for a call-only endpoint. The returned Conn
+// owns nc and closes it on [Conn.Close] or peer EOF.
+func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) *Conn {
 	c := &Conn{
 		nc:       nc,
 		dispatch: dispatch,
