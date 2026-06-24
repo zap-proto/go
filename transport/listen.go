@@ -68,6 +68,14 @@ func ListenStream(network, addr string, dispatch Dispatch, stream StreamHandler)
 	if err != nil {
 		return nil, err
 	}
+	return ServeStream(ln, dispatch, stream), nil
+}
+
+// ServeStream is [Serve] for services with streaming RPCs: it serves both a
+// unary dispatch and a stream handler (either may be nil) on an already-bound
+// listener. It takes ownership of ln. Use it when the caller binds the
+// listener itself (e.g. to fail fast on a bind error before serving).
+func ServeStream(ln net.Listener, dispatch Dispatch, stream StreamHandler) *Server {
 	s := &Server{
 		ln:       ln,
 		dispatch: dispatch,
@@ -75,7 +83,7 @@ func ListenStream(network, addr string, dispatch Dispatch, stream StreamHandler)
 		conns:    make(map[*Conn]struct{}),
 	}
 	go s.acceptLoop()
-	return s, nil
+	return s
 }
 
 // Addr is the listener's network address (useful with ":0" / a temp socket).
