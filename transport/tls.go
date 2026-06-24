@@ -66,6 +66,25 @@ func ListenTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (*Serv
 	return Serve(ln, dispatch), nil
 }
 
+// ListenStreamTLS binds addr on network and serves BOTH unary RPCs (dispatch)
+// and server-side streams (stream) over PQ-secured TLS — the TLS analogue of
+// [ListenStream]. conf must carry a server certificate; wrap it with
+// [PQTLSConfig] to require the X25519MLKEM768 hybrid (PQ X-Wing). The client
+// side is the ordinary [DialTLS] [Conn]: client-initiated [Conn.OpenStream]
+// needs no server-side handler, so a DialTLS Conn already drives these streams.
+// This is what a streaming service (e.g. a filer's ListEntries /
+// SubscribeMetadata) needs to run encrypted+PQ — [ListenTLS] is unary-only.
+func ListenStreamTLS(network, addr string, conf *tls.Config, dispatch Dispatch, stream StreamHandler) (*Server, error) {
+	if network == "unix" {
+		_ = removeIfSocket(addr)
+	}
+	ln, err := tls.Listen(network, addr, conf)
+	if err != nil {
+		return nil, err
+	}
+	return ServeStream(ln, dispatch, stream), nil
+}
+
 // TLS returns the negotiated TLS connection state, or nil if the connection
 // is plaintext. Use it to confirm the PQ curve in use, e.g.
 // `conn.TLS().testingOnlyCurveID` in tests or `conn.TLS().Version` /
