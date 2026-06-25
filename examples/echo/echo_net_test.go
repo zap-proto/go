@@ -9,10 +9,10 @@ import (
 	"github.com/zap-proto/go/transport"
 )
 
-// Compile-time proof that the network transport's *Conn satisfies the
-// codegen-emitted client channel interface verbatim — i.e. a generated
+// Compile-time proof that the network transport's [transport.Conn] satisfies
+// the codegen-emitted client channel interface verbatim — i.e. a generated
 // client takes it with no adapter.
-var _ EchoChannel = (*transport.Conn)(nil)
+var _ EchoChannel = transport.Conn(nil)
 
 // TestEcho_OverNetworkTransport drives the REAL generated EchoClient against
 // the REAL generated DispatchEcho, but over a live socket via the transport

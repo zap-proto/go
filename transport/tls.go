@@ -35,12 +35,12 @@ func PQTLSConfig(base *tls.Config) *tls.Config {
 // pin X25519MLKEM768. The handshake is forced before returning so a
 // curve-negotiation failure (peer cannot do PQ) surfaces here, not on the
 // first Call.
-func DialTLS(network, addr string, conf *tls.Config) (*Conn, error) {
+func DialTLS(network, addr string, conf *tls.Config) (Conn, error) {
 	return DialServeTLS(network, addr, conf, nil)
 }
 
 // DialServeTLS is [DialTLS] plus an inbound Dispatch (bidirectional peer).
-func DialServeTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (*Conn, error) {
+func DialServeTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (Conn, error) {
 	nc, err := tls.Dial(network, addr, conf)
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func ListenStreamTLS(network, addr string, conf *tls.Config, dispatch Dispatch, 
 // is plaintext. Use it to confirm the PQ curve in use, e.g.
 // `conn.TLS().testingOnlyCurveID` in tests or `conn.TLS().Version` /
 // `CipherSuite` for audit logging.
-func (c *Conn) TLS() *tls.ConnectionState {
+func (c *muxConn) TLS() *tls.ConnectionState {
 	if tc, ok := c.nc.(*tls.Conn); ok {
 		st := tc.ConnectionState()
 		return &st

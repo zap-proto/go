@@ -142,7 +142,7 @@ func TestRoundTrip_PQTLS_Stream(t *testing.T) {
 	const method = 7
 	frames := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 
-	streamH := func(m uint32, init []byte, s *Stream) {
+	streamH := func(m uint32, init []byte, s Stream) {
 		if m != method {
 			return
 		}

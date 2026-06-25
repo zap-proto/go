@@ -21,7 +21,7 @@ func TestPool_ReuseEvictClose(t *testing.T) {
 	addr := srv.Addr().String()
 
 	var dials atomic.Int64
-	p := NewPool(func(a string) (*Conn, error) {
+	p := NewPool(func(a string) (Conn, error) {
 		dials.Add(1)
 		return Dial("tcp", a)
 	})
@@ -89,11 +89,11 @@ func TestPool_With(t *testing.T) {
 	addr := srv.Addr().String()
 
 	var dials atomic.Int64
-	p := NewPool(func(a string) (*Conn, error) { dials.Add(1); return Dial("tcp", a) })
+	p := NewPool(func(a string) (Conn, error) { dials.Add(1); return Dial("tcp", a) })
 
 	// Two Withs reuse one conn; an echo round-trip proves the borrowed conn works.
 	for i := 0; i < 2; i++ {
-		if err := p.With(addr, func(c *Conn) error {
+		if err := p.With(addr, func(c Conn) error {
 			resp, err := c.Call(rpc.BuildRequest(rpc.Call{Method: 1, PromiseID: c.NextPromiseID(), Payload: []byte("hi")}))
 			if err != nil {
 				return err
@@ -111,8 +111,8 @@ func TestPool_With(t *testing.T) {
 	}
 
 	// A conn that dies inside fn is evicted, so the next With redials.
-	_ = p.With(addr, func(c *Conn) error { _ = c.Close(); return ErrClosed })
-	_ = p.With(addr, func(c *Conn) error { return nil })
+	_ = p.With(addr, func(c Conn) error { _ = c.Close(); return ErrClosed })
+	_ = p.With(addr, func(c Conn) error { return nil })
 	if got := dials.Load(); got != 2 {
 		t.Fatalf("dials = %d, want 2 (redial after in-fn death)", got)
 	}

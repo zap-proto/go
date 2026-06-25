@@ -17,21 +17,21 @@ import "sync"
 // plaintext [Dial], PQ-TLS [DialTLS]+[PQTLSConfig], QUIC — and the network/addr
 // shape. Pool itself is transport-agnostic. Safe for concurrent use.
 type Pool struct {
-	dial func(addr string) (*Conn, error)
+	dial func(addr string) (Conn, error)
 
 	mu    sync.Mutex
-	conns map[string]*Conn
+	conns map[string]Conn
 }
 
 // NewPool returns a Pool that dials new connections with dial.
-func NewPool(dial func(addr string) (*Conn, error)) *Pool {
-	return &Pool{dial: dial, conns: make(map[string]*Conn)}
+func NewPool(dial func(addr string) (Conn, error)) *Pool {
+	return &Pool{dial: dial, conns: make(map[string]Conn)}
 }
 
 // Get returns a live connection to addr, dialing and caching one if none is
 // live. Concurrent Gets for the same addr that race a dial keep one winner and
 // close the loser, so at most one conn per addr is cached.
-func (p *Pool) Get(addr string) (*Conn, error) {
+func (p *Pool) Get(addr string) (Conn, error) {
 	p.mu.Lock()
 	if c := p.conns[addr]; c != nil && !c.IsClosed() {
 		p.mu.Unlock()
@@ -62,9 +62,9 @@ func (p *Pool) Get(addr string) (*Conn, error) {
 // per-service typed helper is then a one-liner, e.g.
 //
 //	func WithFiler(addr string, fn func(FilerClient) error) error {
-//	    return filerPool.With(addr, func(c *transport.Conn) error { return fn(NewFilerClient(c)) })
+//	    return filerPool.With(addr, func(c transport.Conn) error { return fn(NewFilerClient(c)) })
 //	}
-func (p *Pool) With(addr string, fn func(*Conn) error) error {
+func (p *Pool) With(addr string, fn func(Conn) error) error {
 	conn, err := p.Get(addr)
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func (p *Pool) With(addr string, fn func(*Conn) error) error {
 // Evict drops conn for addr, but only if it is still the cached entry — so a
 // late Evict of a conn already replaced by a healthy redial is a no-op. Call it
 // when a request on conn fails with [ErrClosed].
-func (p *Pool) Evict(addr string, conn *Conn) {
+func (p *Pool) Evict(addr string, conn Conn) {
 	p.mu.Lock()
 	if p.conns[addr] == conn {
 		delete(p.conns, addr)
