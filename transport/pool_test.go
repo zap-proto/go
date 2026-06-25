@@ -1,0 +1,78 @@
+// Copyright (C) 2026, Lux Industries Inc. All rights reserved.
+// See the file LICENSE for licensing terms.
+
+package transport
+
+import (
+	"net"
+	"sync/atomic"
+	"testing"
+)
+
+func TestPool_ReuseEvictClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := Serve(ln, echoDispatch)
+	defer srv.Close()
+	addr := srv.Addr().String()
+
+	var dials atomic.Int64
+	p := NewPool(func(a string) (*Conn, error) {
+		dials.Add(1)
+		return Dial("tcp", a)
+	})
+
+	// Reuse: two Gets return the same live conn after a single dial.
+	c1, err := p.Get(addr)
+	if err != nil {
+		t.Fatalf("Get1: %v", err)
+	}
+	c2, err := p.Get(addr)
+	if err != nil {
+		t.Fatalf("Get2: %v", err)
+	}
+	if c1 != c2 {
+		t.Fatal("Pool.Get returned a different conn for the same addr")
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1 (reuse)", got)
+	}
+
+	// Death: a dropped conn is detected on the next Get and replaced.
+	_ = c1.Close()
+	c3, err := p.Get(addr)
+	if err != nil {
+		t.Fatalf("Get3: %v", err)
+	}
+	if c3 == c1 {
+		t.Fatal("Pool.Get returned the dead conn")
+	}
+	if got := dials.Load(); got != 2 {
+		t.Fatalf("dials = %d, want 2 (redial after death)", got)
+	}
+
+	// Evict only removes the matching entry.
+	p.Evict(addr, c1) // stale: c3 is cached now, so this is a no-op
+	if c4, _ := p.Get(addr); c4 != c3 {
+		t.Fatal("stale Evict wrongly dropped the live conn")
+	}
+	p.Evict(addr, c3) // current: drops it
+	if c5, _ := p.Get(addr); c5 == c3 {
+		t.Fatal("Evict did not drop the current conn")
+	}
+	if got := dials.Load(); got != 3 {
+		t.Fatalf("dials = %d, want 3", got)
+	}
+
+	// Close closes everything.
+	p.Close()
+	c6, _ := p.Get(addr)
+	if c6 == nil {
+		t.Fatal("Get after Close should redial")
+	}
+	if got := dials.Load(); got != 4 {
+		t.Fatalf("dials = %d, want 4 (redial after Close)", got)
+	}
+}
