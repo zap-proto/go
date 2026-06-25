@@ -10,12 +10,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/zap-proto/go/rpc"
+	"github.com/zap-proto/go/transport"
 )
 
 func genCert(t *testing.T) tls.Certificate {
@@ -85,5 +87,59 @@ func TestRoundTrip_QUIC_PQ(t *testing.T) {
 	}
 	if string(resp.Body) != "zap-over-quic-pq-x-wing" {
 		t.Fatalf("body = %q", resp.Body)
+	}
+}
+
+// TestRoundTrip_QUIC_Stream_PQ proves server-side streaming over PQ-secured QUIC
+// via ListenStream — the streaming capability Listen (unary-only) lacked. A
+// successful X25519MLKEM768 handshake plus the streamed frames arriving is proof
+// ZAP streaming runs over PQ QUIC.
+func TestRoundTrip_QUIC_Stream_PQ(t *testing.T) {
+	const method = 9
+	streamH := func(m uint32, init []byte, s *transport.Stream) {
+		if m != method {
+			return
+		}
+		for _, f := range [][]byte{[]byte("1"), []byte("2"), []byte("3")} {
+			if err := s.Send(append(append([]byte{}, init...), f...)); err != nil {
+				return
+			}
+		}
+		_ = s.CloseSend()
+	}
+
+	cert := genCert(t)
+	srv, err := ListenStream("127.0.0.1:0",
+		&tls.Config{Certificates: []tls.Certificate{cert}}, echoDispatch, streamH)
+	if err != nil {
+		t.Fatalf("ListenStream: %v", err)
+	}
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, srv.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	st, err := conn.OpenStream(method, []byte("q:"))
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	var got []string
+	for {
+		b, err := st.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		got = append(got, string(b))
+	}
+	if len(got) != 3 || got[0] != "q:1" || got[2] != "q:3" {
+		t.Fatalf("streamed = %v, want [q:1 q:2 q:3]", got)
 	}
 }

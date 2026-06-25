@@ -75,6 +75,7 @@ func Dial(ctx context.Context, addr string, conf *tls.Config) (*transport.Conn, 
 type Server struct {
 	ln       *qgo.Listener
 	dispatch transport.Dispatch
+	stream   transport.StreamHandler // server-side stream dispatch (nil = unary only)
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
@@ -82,12 +83,19 @@ type Server struct {
 // Listen binds addr (UDP) and serves dispatch over PQ-secured QUIC. conf
 // must carry a server certificate.
 func Listen(addr string, conf *tls.Config, dispatch transport.Dispatch) (*Server, error) {
+	return ListenStream(addr, conf, dispatch, nil)
+}
+
+// ListenStream binds addr (UDP) and serves BOTH unary requests (dispatch) and
+// server-side streams (stream) over PQ-secured QUIC — the QUIC analogue of
+// [transport.ListenStream]. conf must carry a server certificate.
+func ListenStream(addr string, conf *tls.Config, dispatch transport.Dispatch, stream transport.StreamHandler) (*Server, error) {
 	ln, err := qgo.ListenAddr(addr, pqTLS(conf), nil)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{ln: ln, dispatch: dispatch, ctx: ctx, cancel: cancel}
+	s := &Server{ln: ln, dispatch: dispatch, stream: stream, ctx: ctx, cancel: cancel}
 	go s.acceptLoop()
 	return s, nil
 }
@@ -110,7 +118,7 @@ func (s *Server) serveConn(qc *qgo.Conn) {
 		_ = qc.CloseWithError(0, "")
 		return
 	}
-	transport.NewConn(streamConn{Stream: st, conn: qc}, s.dispatch)
+	transport.NewStreamConn(streamConn{Stream: st, conn: qc}, s.dispatch, s.stream)
 }
 
 // Addr is the listener's UDP address (useful with ":0").

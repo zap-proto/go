@@ -133,6 +133,14 @@ func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) *Conn {
 	return newConn(nc, dispatch, nil)
 }
 
+// NewStreamConn is [NewConn] plus a server-side [StreamHandler], so the Conn
+// serves inbound streams as well as unary requests. Alternate transports (e.g.
+// QUIC) that produce an io.ReadWriteCloser byte-pipe use this to run full
+// unary+streaming ZAP over it.
+func NewStreamConn(nc io.ReadWriteCloser, dispatch Dispatch, stream StreamHandler) *Conn {
+	return newConn(nc, dispatch, stream)
+}
+
 // newConn is the full constructor; the streamHandler is set BEFORE the read
 // loop starts so an immediate inbound stream-open is never dropped.
 func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
