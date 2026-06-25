@@ -55,6 +55,27 @@ func (p *Pool) Get(addr string) (*Conn, error) {
 	return nc, nil
 }
 
+// With gets (or dials) a pooled conn for addr, runs fn with it, and evicts the
+// conn if it died during fn — the canonical "borrow a connection for one logical
+// operation" pattern. fn may issue any number of Calls and OpenStreams on the
+// shared conn; it must not Close it (the Pool owns the conn's lifetime). A
+// per-service typed helper is then a one-liner, e.g.
+//
+//	func WithFiler(addr string, fn func(FilerClient) error) error {
+//	    return filerPool.With(addr, func(c *transport.Conn) error { return fn(NewFilerClient(c)) })
+//	}
+func (p *Pool) With(addr string, fn func(*Conn) error) error {
+	conn, err := p.Get(addr)
+	if err != nil {
+		return err
+	}
+	err = fn(conn)
+	if conn.IsClosed() {
+		p.Evict(addr, conn)
+	}
+	return err
+}
+
 // Evict drops conn for addr, but only if it is still the cached entry — so a
 // late Evict of a conn already replaced by a healthy redial is a no-op. Call it
 // when a request on conn fails with [ErrClosed].
