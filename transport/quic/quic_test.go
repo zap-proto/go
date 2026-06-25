@@ -10,9 +10,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,13 +92,60 @@ func TestRoundTrip_QUIC_PQ(t *testing.T) {
 	}
 }
 
+// TestConcurrentCalls_QUIC proves the native design: 64 Calls in flight at
+// once, each on its OWN QUIC stream, every one getting back exactly its own
+// distinct payload. With per-operation QUIC streams there is no head-of-line
+// blocking across the concurrent calls.
+func TestConcurrentCalls_QUIC(t *testing.T) {
+	cert := genCert(t)
+	srv, err := Listen("127.0.0.1:0",
+		&tls.Config{Certificates: []tls.Certificate{cert}}, echoDispatch)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, srv.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	const n = 64
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			want := fmt.Sprintf("payload-%d", i)
+			req := rpc.BuildRequest(rpc.Call{Method: 1, PromiseID: conn.NextPromiseID(), Payload: []byte(want)})
+			resp, err := conn.CallContext(ctx, req)
+			if err != nil {
+				errs <- fmt.Errorf("call %d: %w", i, err)
+				return
+			}
+			if string(resp.Body) != want {
+				errs <- fmt.Errorf("call %d: body = %q, want %q", i, resp.Body, want)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
 // TestRoundTrip_QUIC_Stream_PQ proves server-side streaming over PQ-secured QUIC
 // via ListenStream — the streaming capability Listen (unary-only) lacked. A
 // successful X25519MLKEM768 handshake plus the streamed frames arriving is proof
 // ZAP streaming runs over PQ QUIC.
 func TestRoundTrip_QUIC_Stream_PQ(t *testing.T) {
 	const method = 9
-	streamH := func(m uint32, init []byte, s *transport.Stream) {
+	streamH := func(m uint32, init []byte, s transport.Stream) {
 		if m != method {
 			return
 		}
