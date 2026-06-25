@@ -31,17 +31,18 @@ func PQTLSConfig(base *tls.Config) *tls.Config {
 }
 
 // DialTLS connects to addr over a PQ-secured TLS connection and returns a
-// call-only [Conn]. conf should usually be wrapped with [PQTLSConfig] to
-// pin X25519MLKEM768. The handshake is forced before returning so a
-// curve-negotiation failure (peer cannot do PQ) surfaces here, not on the
-// first Call.
+// call-only [Conn]. TLS in this transport IS post-quantum: conf carries only
+// the trust material (RootCAs / Certificates / ServerName) and DialTLS pins
+// X25519MLKEM768 itself via [PQTLSConfig] — there is no classical-TLS option.
+// The handshake is forced before returning so a curve-negotiation failure (peer
+// cannot do PQ) surfaces here, not on the first Call.
 func DialTLS(network, addr string, conf *tls.Config) (Conn, error) {
 	return DialServeTLS(network, addr, conf, nil)
 }
 
 // DialServeTLS is [DialTLS] plus an inbound Dispatch (bidirectional peer).
 func DialServeTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (Conn, error) {
-	nc, err := tls.Dial(network, addr, conf)
+	nc, err := tls.Dial(network, addr, PQTLSConfig(conf))
 	if err != nil {
 		return nil, err
 	}
@@ -53,13 +54,13 @@ func DialServeTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (Co
 }
 
 // ListenTLS binds addr on network and serves dispatch over PQ-secured TLS.
-// conf must carry a server certificate; wrap it with [PQTLSConfig] to
-// require X25519MLKEM768.
+// conf must carry a server certificate; ListenTLS pins X25519MLKEM768 itself
+// via [PQTLSConfig] — TLS in this transport is always post-quantum.
 func ListenTLS(network, addr string, conf *tls.Config, dispatch Dispatch) (*Server, error) {
 	if network == "unix" {
 		_ = removeIfSocket(addr)
 	}
-	ln, err := tls.Listen(network, addr, conf)
+	ln, err := tls.Listen(network, addr, PQTLSConfig(conf))
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +79,7 @@ func ListenStreamTLS(network, addr string, conf *tls.Config, dispatch Dispatch, 
 	if network == "unix" {
 		_ = removeIfSocket(addr)
 	}
-	ln, err := tls.Listen(network, addr, conf)
+	ln, err := tls.Listen(network, addr, PQTLSConfig(conf))
 	if err != nil {
 		return nil, err
 	}
