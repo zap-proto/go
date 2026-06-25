@@ -30,13 +30,23 @@
 // Correlation lives in the envelope itself (rpc.Call.PromiseID /
 // rpc.Response.PromiseID), so the transport adds no correlation header of
 // its own — it reads the PromiseID out of the envelope it is already
-// shipping. Pure Go; no CGO. TCP and Unix are built in here; QUIC + the
-// PQ X-Wing (X25519MLKEM768) handshake live in quic.go behind the same
-// [Conn]/[Dispatch] contract.
+// shipping. Pure Go; no CGO.
+//
+// [Conn] and [Stream] are INTERFACES — the contract every transport realises.
+// The byte-pipe transport (TCP/Unix in this package, PQ-TLS in tls.go) muxes
+// ZAP frames over one io.ReadWriteCloser via [muxConn]/[muxStream]. The quic
+// subpackage realises the same contract NATIVELY — one QUIC stream per ZAP
+// operation, so concurrent calls never head-of-line-block each other.
+//
+// PQ by default: the production entry points ([DialTLS], [ListenTLS],
+// [ListenStreamTLS], and the quic subpackage) pin the X25519MLKEM768 hybrid
+// (PQ X-Wing) and refuse a classical-only peer. The plaintext [Dial] /
+// [Listen] / [ServeStream] path exists only for loopback and tests.
 package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -94,11 +104,58 @@ type Channel interface {
 	Call(envelope []byte) (rpc.Response, error)
 }
 
-// Conn is one ZAP-RPC connection. It is symmetric: every Conn runs a read
-// loop that delivers inbound responses to waiting [Conn.Call]s and, when a
-// Dispatch was supplied, serves inbound requests. Safe for concurrent use.
-type Conn struct {
-	nc       io.ReadWriteCloser // *net.TCPConn / *tls.Conn / quic stream
+// Conn is one ZAP-RPC connection: the contract every transport realises. It
+// is symmetric (either end may call and serve) and safe for concurrent use.
+// The byte-pipe transport (TCP/Unix/TLS) realises it with [muxConn], which
+// muxes ZAP frames over one io.ReadWriteCloser; QUIC realises it natively,
+// one QUIC stream per operation (no head-of-line blocking). A generated
+// client takes a Conn unchanged — it consumes only [Channel] (Call).
+type Conn interface {
+	// Call ships a request envelope and blocks until the correlated response
+	// arrives or the connection closes.
+	Call(envelope []byte) (rpc.Response, error)
+	// CallContext is Call that also aborts when ctx is done.
+	CallContext(ctx context.Context, envelope []byte) (rpc.Response, error)
+	// OpenStream opens a client stream carrying method + init; the peer's
+	// [StreamHandler] is invoked with (method, init, its side of the stream).
+	OpenStream(method uint32, init []byte) (Stream, error)
+	// NextPromiseID hands out a monotonic local PromiseID for hand-written
+	// callers that build envelopes directly (generated clients carry their
+	// own rpc.Session).
+	NextPromiseID() uint32
+	// IsClosed reports whether the connection has been torn down — locally
+	// via Close or by the peer / a read error.
+	IsClosed() bool
+	// Close shuts the connection and fails every in-flight Call with ErrClosed.
+	Close() error
+	// TLS returns the negotiated TLS connection state, or nil for a plaintext
+	// (loopback/test) connection.
+	TLS() *tls.ConnectionState
+}
+
+// Stream is a bidirectional sequence of messages. Recv yields inbound
+// messages until the peer half-closes (io.EOF) or the connection drops
+// ([ErrClosed]); Send/CloseSend drive the outbound half. Safe for one
+// concurrent Send and one concurrent Recv — the standard streaming usage.
+type Stream interface {
+	// Send writes one message on the stream's outbound half.
+	Send(body []byte) error
+	// Recv returns the next inbound message, io.EOF once the peer half-closes,
+	// or [ErrClosed] if the connection drops.
+	Recv() ([]byte, error)
+	// CloseSend half-closes the outbound direction; the peer's Recv then
+	// returns io.EOF. Idempotent.
+	CloseSend() error
+	// Context is cancelled when the stream ends or the connection drops.
+	Context() context.Context
+}
+
+// muxConn is the byte-pipe realisation of [Conn]: it muxes ZAP frames over
+// one io.ReadWriteCloser (a *net.TCPConn / Unix conn, a *tls.Conn, …). It is
+// symmetric: every muxConn runs a read loop that delivers inbound responses
+// to waiting Calls and, when a Dispatch was supplied, serves inbound requests.
+type muxConn struct {
+	nc       io.ReadWriteCloser // *net.TCPConn / Unix conn / *tls.Conn
 	dispatch Dispatch
 
 	wmu sync.Mutex // serialises frame writes (one writer at a time)
@@ -109,8 +166,8 @@ type Conn struct {
 	pending map[uint32]chan rpc.Response
 
 	streamMu      sync.Mutex
-	streams       map[uint32]*Stream // active streams by streamID
-	streamHandler StreamHandler      // server-side stream dispatch (nil = none)
+	streams       map[uint32]*muxStream // active streams by streamID
+	streamHandler StreamHandler         // server-side stream dispatch (nil = none)
 
 	sem chan struct{} // bounds concurrent inbound dispatches (backpressure)
 
@@ -125,32 +182,32 @@ type Conn struct {
 	cancel context.CancelFunc
 }
 
-// NewConn wraps an established stream (a *net.TCPConn / Unix conn, a
-// *tls.Conn, or a QUIC stream — anything io.ReadWriteCloser) and starts its
-// read loop. dispatch may be nil for a call-only endpoint. The returned Conn
-// owns nc and closes it on [Conn.Close] or peer EOF.
-func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) *Conn {
+// NewConn wraps an established byte pipe (a *net.TCPConn / Unix conn, a
+// *tls.Conn — anything io.ReadWriteCloser) in a frame-muxing [Conn] and
+// starts its read loop. dispatch may be nil for a call-only endpoint. The
+// returned Conn owns nc and closes it on [Conn.Close] or peer EOF. (QUIC has
+// its own native realisation in the quic subpackage and does NOT go through
+// here.)
+func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) Conn {
 	return newConn(nc, dispatch, nil)
 }
 
 // NewStreamConn is [NewConn] plus a server-side [StreamHandler], so the Conn
-// serves inbound streams as well as unary requests. Alternate transports (e.g.
-// QUIC) that produce an io.ReadWriteCloser byte-pipe use this to run full
-// unary+streaming ZAP over it.
-func NewStreamConn(nc io.ReadWriteCloser, dispatch Dispatch, stream StreamHandler) *Conn {
+// serves inbound streams as well as unary requests.
+func NewStreamConn(nc io.ReadWriteCloser, dispatch Dispatch, stream StreamHandler) Conn {
 	return newConn(nc, dispatch, stream)
 }
 
 // newConn is the full constructor; the streamHandler is set BEFORE the read
 // loop starts so an immediate inbound stream-open is never dropped.
-func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
+func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *muxConn {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Conn{
+	c := &muxConn{
 		nc:            nc,
 		dispatch:      dispatch,
 		streamHandler: sh,
 		pending:       make(map[uint32]chan rpc.Response),
-		streams:       make(map[uint32]*Stream),
+		streams:       make(map[uint32]*muxStream),
 		sem:           make(chan struct{}, maxInFlight),
 		closed:        make(chan struct{}),
 		ctx:           ctx,
@@ -160,16 +217,17 @@ func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
 	return c
 }
 
-// Dial connects to addr over network ("tcp" or "unix") and returns a
-// call-only [Conn]. Use [DialServe] to also serve inbound requests on the
-// same connection (bidirectional peers).
-func Dial(network, addr string) (*Conn, error) {
+// Dial connects to addr over network ("tcp" or "unix") in PLAINTEXT and
+// returns a call-only [Conn]. This is the loopback/test path — production
+// peers use [DialTLS] (PQ X-Wing) or the quic subpackage, both PQ by default.
+// Use [DialServe] to also serve inbound requests (bidirectional peers).
+func Dial(network, addr string) (Conn, error) {
 	return DialServe(network, addr, nil)
 }
 
 // DialServe is [Dial] plus an inbound Dispatch, for a peer that both calls
-// and serves over one connection.
-func DialServe(network, addr string, dispatch Dispatch) (*Conn, error) {
+// and serves over one plaintext connection.
+func DialServe(network, addr string, dispatch Dispatch) (Conn, error) {
 	nc, err := net.Dial(network, addr)
 	if err != nil {
 		return nil, err
@@ -187,7 +245,7 @@ func DialServe(network, addr string, dispatch Dispatch) (*Conn, error) {
 // The PromiseID is read from the envelope (the generated client already
 // stamped it from its rpc.Session), so request and response correlate
 // without a transport-level id.
-func (c *Conn) Call(envelope []byte) (rpc.Response, error) {
+func (c *muxConn) Call(envelope []byte) (rpc.Response, error) {
 	call, err := rpc.ParseRequest(envelope)
 	if err != nil {
 		return rpc.Response{}, err
@@ -214,7 +272,7 @@ func (c *Conn) Call(envelope []byte) (rpc.Response, error) {
 }
 
 // CallContext is [Conn.Call] that also aborts when ctx is done.
-func (c *Conn) CallContext(ctx context.Context, envelope []byte) (rpc.Response, error) {
+func (c *muxConn) CallContext(ctx context.Context, envelope []byte) (rpc.Response, error) {
 	call, err := rpc.ParseRequest(envelope)
 	if err != nil {
 		return rpc.Response{}, err
@@ -245,12 +303,12 @@ func (c *Conn) CallContext(ctx context.Context, envelope []byte) (rpc.Response, 
 // NextPromiseID hands out a monotonic local PromiseID. Generated clients
 // carry their own rpc.Session, so this is only needed by hand-written
 // callers that build envelopes directly.
-func (c *Conn) NextPromiseID() uint32 { return c.promiseID.Add(1) }
+func (c *muxConn) NextPromiseID() uint32 { return c.promiseID.Add(1) }
 
 // IsClosed reports whether the connection has been torn down — either
 // locally via [Conn.Close] or by the peer / a read error closing the read
 // loop. A connection-pool keeper uses it to evict and redial dead entries.
-func (c *Conn) IsClosed() bool {
+func (c *muxConn) IsClosed() bool {
 	select {
 	case <-c.closed:
 		return true
@@ -260,7 +318,7 @@ func (c *Conn) IsClosed() bool {
 }
 
 // Close shuts the connection and fails every in-flight Call with ErrClosed.
-func (c *Conn) Close() error {
+func (c *muxConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		c.cancel() // release every stream handler blocked on its Context
@@ -269,7 +327,7 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-func (c *Conn) readLoop() {
+func (c *muxConn) readLoop() {
 	defer c.Close()
 	for {
 		dir, body, err := readFrame(c.nc)
@@ -317,7 +375,7 @@ func (c *Conn) readLoop() {
 // serve dispatches one inbound request and writes its response. A dispatch
 // (protocol) error still yields a StatusInternal response so the caller's
 // Call never hangs.
-func (c *Conn) serve(envelope []byte) {
+func (c *muxConn) serve(envelope []byte) {
 	defer func() { <-c.sem }() // release the in-flight slot acquired by readLoop
 	respBytes, err := c.dispatch(envelope)
 	if err != nil {
@@ -335,7 +393,7 @@ func (c *Conn) serve(envelope []byte) {
 // writeFrame writes one direction-tagged, length-prefixed frame. Writes are
 // serialised so concurrent Calls and inbound responses never interleave on
 // the wire.
-func (c *Conn) writeFrame(dir byte, envelope []byte) error {
+func (c *muxConn) writeFrame(dir byte, envelope []byte) error {
 	var hdr [5]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(1+len(envelope)))
 	hdr[4] = dir

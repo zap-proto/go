@@ -15,7 +15,7 @@ import (
 // initial payload, the server pushes N messages and returns (half-close), and
 // the client receives all N then io.EOF.
 func TestServerStream(t *testing.T) {
-	sh := func(method uint32, init []byte, s *Stream) {
+	sh := func(method uint32, init []byte, s Stream) {
 		if method != 7 {
 			return
 		}
@@ -62,7 +62,7 @@ func TestServerStream(t *testing.T) {
 // and half-closes; the server echoes each back (prefixed) as it arrives, then
 // sees EOF and half-closes its side; the client receives N echoes then io.EOF.
 func TestBidiStream(t *testing.T) {
-	sh := func(method uint32, init []byte, s *Stream) {
+	sh := func(method uint32, init []byte, s Stream) {
 		for {
 			msg, err := s.Recv()
 			if err == io.EOF {
@@ -121,7 +121,7 @@ func TestBidiStream(t *testing.T) {
 // handler would block forever (no frames arrive to error a Send/Recv).
 func TestStreamContextCancelOnConnDrop(t *testing.T) {
 	released := make(chan struct{})
-	h := func(method uint32, init []byte, s *Stream) {
+	h := func(method uint32, init []byte, s Stream) {
 		<-s.Context().Done() // idle: no Send/Recv, only the context can free us
 		close(released)
 	}

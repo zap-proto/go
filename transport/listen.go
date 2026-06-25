@@ -18,7 +18,7 @@ type Server struct {
 	stream   StreamHandler // optional server-side stream dispatch
 
 	mu     sync.Mutex
-	conns  map[*Conn]struct{}
+	conns  map[Conn]struct{}
 	closed bool
 }
 
@@ -51,7 +51,7 @@ func Serve(ln net.Listener, dispatch Dispatch) *Server {
 	s := &Server{
 		ln:       ln,
 		dispatch: dispatch,
-		conns:    make(map[*Conn]struct{}),
+		conns:    make(map[Conn]struct{}),
 	}
 	go s.acceptLoop()
 	return s
@@ -80,7 +80,7 @@ func ServeStream(ln net.Listener, dispatch Dispatch, stream StreamHandler) *Serv
 		ln:       ln,
 		dispatch: dispatch,
 		stream:   stream,
-		conns:    make(map[*Conn]struct{}),
+		conns:    make(map[Conn]struct{}),
 	}
 	go s.acceptLoop()
 	return s
@@ -115,7 +115,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
-	conns := make([]*Conn, 0, len(s.conns))
+	conns := make([]Conn, 0, len(s.conns))
 	for c := range s.conns {
 		conns = append(conns, c)
 	}

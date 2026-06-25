@@ -14,19 +14,16 @@ import (
 
 // StreamHandler serves one inbound stream on the server: method is the rpc
 // ordinal from the open envelope, init its initial payload, and s the
-// bidirectional stream to Recv from / Send on. It runs on its own goroutine;
+// bidirectional [Stream] to Recv from / Send on. It runs on its own goroutine;
 // returning half-closes the stream's send side (the peer's Recv sees io.EOF).
 // This one handler covers server-, client-, and bidirectional streaming —
 // the shape is just which side calls Send vs Recv.
-type StreamHandler func(method uint32, init []byte, s *Stream)
+type StreamHandler func(method uint32, init []byte, s Stream)
 
-// Stream is a bidirectional sequence of message frames correlated by a
-// streamID (the opener's PromiseID). Recv yields inbound messages until the
-// peer half-closes (io.EOF); Send/CloseSend drive the outbound half. Safe
-// for one concurrent Send and one concurrent Recv — the standard streaming
-// RPC usage.
-type Stream struct {
-	conn *Conn
+// muxStream is the byte-pipe realisation of [Stream], correlated by a streamID
+// (the opener's PromiseID) and carried as dirStream* frames on its [muxConn].
+type muxStream struct {
+	conn *muxConn
 	id   uint32
 	recv chan []byte
 
@@ -45,15 +42,15 @@ type Stream struct {
 // Context is cancelled when the stream ends or the connection drops. Server
 // stream handlers should derive their work from it so a dropped peer (even an
 // idle one with no in-flight frames) releases the handler.
-func (s *Stream) Context() context.Context { return s.ctx }
+func (s *muxStream) Context() context.Context { return s.ctx }
 
 // OpenStream opens a client stream: allocates a streamID, sends the open
-// frame carrying method + init, and returns the Stream to drive. The peer's
+// frame carrying method + init, and returns the [Stream] to drive. The peer's
 // [StreamHandler] is invoked with (method, init, its side of the stream).
-func (c *Conn) OpenStream(method uint32, init []byte) (*Stream, error) {
+func (c *muxConn) OpenStream(method uint32, init []byte) (Stream, error) {
 	id := c.NextPromiseID()
 	sctx, scancel := context.WithCancel(c.ctx)
-	s := &Stream{conn: c, id: id, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
+	s := &muxStream{conn: c, id: id, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
 	c.streamMu.Lock()
 	c.streams[id] = s
 	c.streamMu.Unlock()
@@ -70,7 +67,7 @@ func (c *Conn) OpenStream(method uint32, init []byte) (*Stream, error) {
 
 // routeStream dispatches one inbound stream frame (body already copied off
 // the read buffer).
-func (c *Conn) routeStream(dir byte, body []byte) {
+func (c *muxConn) routeStream(dir byte, body []byte) {
 	switch dir {
 	case dirStreamOpen:
 		call, err := rpc.ParseRequest(body)
@@ -84,7 +81,7 @@ func (c *Conn) routeStream(dir byte, body []byte) {
 			return // not a stream server
 		}
 		sctx, scancel := context.WithCancel(c.ctx)
-		s := &Stream{conn: c, id: call.PromiseID, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
+		s := &muxStream{conn: c, id: call.PromiseID, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
 		c.streams[call.PromiseID] = s
 		c.streamMu.Unlock()
 		init := append([]byte(nil), call.Payload...) // payload aliases body
@@ -124,7 +121,7 @@ func (c *Conn) routeStream(dir byte, body []byte) {
 }
 
 // Send writes one message on the stream's outbound half.
-func (s *Stream) Send(body []byte) error {
+func (s *muxStream) Send(body []byte) error {
 	frame := make([]byte, 4+len(body))
 	binary.LittleEndian.PutUint32(frame[:4], s.id)
 	copy(frame[4:], body)
@@ -133,7 +130,7 @@ func (s *Stream) Send(body []byte) error {
 
 // CloseSend half-closes the outbound direction; the peer's [Stream.Recv]
 // then returns io.EOF. Idempotent.
-func (s *Stream) CloseSend() error {
+func (s *muxStream) CloseSend() error {
 	s.mu.Lock()
 	if s.sendDone {
 		s.mu.Unlock()
@@ -149,7 +146,7 @@ func (s *Stream) CloseSend() error {
 
 // Recv returns the next inbound message, io.EOF once the peer half-closes,
 // or [ErrClosed] if the connection drops.
-func (s *Stream) Recv() ([]byte, error) {
+func (s *muxStream) Recv() ([]byte, error) {
 	select {
 	case msg, ok := <-s.recv:
 		if !ok {
@@ -161,7 +158,7 @@ func (s *Stream) Recv() ([]byte, error) {
 	}
 }
 
-func (s *Stream) closeRecv() {
+func (s *muxStream) closeRecv() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.recvDone {
