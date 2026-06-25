@@ -92,19 +92,30 @@ func TestRoundTrip_PQTLS(t *testing.T) {
 // best-effort.
 func TestPQRequired_NoClassicalDowngrade(t *testing.T) {
 	cert := genCert(t)
+	// Pass a RAW config (no PQTLSConfig wrap) — ListenTLS pins X-Wing itself, so
+	// this also proves TLS is PQ by construction.
 	srv, err := ListenTLS("tcp", "127.0.0.1:0",
-		PQTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}), echoDispatch)
+		&tls.Config{Certificates: []tls.Certificate{cert}}, echoDispatch)
 	if err != nil {
 		t.Fatalf("ListenTLS: %v", err)
 	}
 	defer srv.Close()
 
+	// A classical-only peer that does NOT come through our PQ-forcing DialTLS
+	// (a stock TLS client / an attacker) must be refused by the server — the
+	// downgrade guarantee lives in the server's curve list, not the client's
+	// goodwill. Dial raw to bypass DialTLS's enforced PQ.
 	classicalOnly := &tls.Config{
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS13,
 		CurvePreferences:   []tls.CurveID{tls.X25519}, // no PQ on offer
 	}
-	if _, err := DialTLS("tcp", srv.Addr().String(), classicalOnly); err == nil {
+	nc, err := tls.Dial("tcp", srv.Addr().String(), classicalOnly)
+	if err == nil {
+		err = nc.Handshake()
+		_ = nc.Close()
+	}
+	if err == nil {
 		t.Fatal("PQ-only server accepted a classical-only client; downgrade not prevented")
 	}
 }
