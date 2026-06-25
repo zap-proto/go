@@ -7,6 +7,8 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+
+	"github.com/zap-proto/go/rpc"
 )
 
 func TestPool_ReuseEvictClose(t *testing.T) {
