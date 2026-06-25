@@ -6,7 +6,9 @@ package transport
 import (
 	"fmt"
 	"io"
+	"net"
 	"testing"
+	"time"
 )
 
 // TestServerStream proves server-streaming: the client opens a stream with an
@@ -110,5 +112,40 @@ func TestBidiStream(t *testing.T) {
 	}
 	if len(got) != 3 || got[0] != "echo:m0" || got[2] != "echo:m2" {
 		t.Fatalf("got %v, want [echo:m0 echo:m1 echo:m2]", got)
+	}
+}
+
+// TestStreamContextCancelOnConnDrop proves a stream handler that blocks on
+// Stream.Context().Done() (an idle long-lived subscription) is released when the
+// peer drops the connection — the leak fix. Without per-stream cancellation the
+// handler would block forever (no frames arrive to error a Send/Recv).
+func TestStreamContextCancelOnConnDrop(t *testing.T) {
+	released := make(chan struct{})
+	h := func(method uint32, init []byte, s *Stream) {
+		<-s.Context().Done() // idle: no Send/Recv, only the context can free us
+		close(released)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := ServeStream(ln, echoDispatch, h)
+	defer srv.Close()
+
+	conn, err := Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := conn.OpenStream(1, []byte("subscribe")); err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	// Drop the connection while the handler is idle.
+	_ = conn.Close()
+
+	select {
+	case <-released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle stream handler not released after peer dropped the connection (leak)")
 	}
 }
