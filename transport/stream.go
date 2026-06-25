@@ -4,6 +4,7 @@
 package transport
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"sync"
@@ -29,17 +30,30 @@ type Stream struct {
 	id   uint32
 	recv chan []byte
 
+	// ctx is cancelled when the stream ends (half-close / handler return) OR
+	// the connection drops (it derives from conn.ctx). A streaming handler
+	// gates its idle wait on Context().Done() so a disconnected idle peer is
+	// observed and the handler returns instead of leaking.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	mu       sync.Mutex
 	recvDone bool
 	sendDone bool
 }
+
+// Context is cancelled when the stream ends or the connection drops. Server
+// stream handlers should derive their work from it so a dropped peer (even an
+// idle one with no in-flight frames) releases the handler.
+func (s *Stream) Context() context.Context { return s.ctx }
 
 // OpenStream opens a client stream: allocates a streamID, sends the open
 // frame carrying method + init, and returns the Stream to drive. The peer's
 // [StreamHandler] is invoked with (method, init, its side of the stream).
 func (c *Conn) OpenStream(method uint32, init []byte) (*Stream, error) {
 	id := c.NextPromiseID()
-	s := &Stream{conn: c, id: id, recv: make(chan []byte, 16)}
+	sctx, scancel := context.WithCancel(c.ctx)
+	s := &Stream{conn: c, id: id, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
 	c.streamMu.Lock()
 	c.streams[id] = s
 	c.streamMu.Unlock()
@@ -69,13 +83,15 @@ func (c *Conn) routeStream(dir byte, body []byte) {
 			c.streamMu.Unlock()
 			return // not a stream server
 		}
-		s := &Stream{conn: c, id: call.PromiseID, recv: make(chan []byte, 16)}
+		sctx, scancel := context.WithCancel(c.ctx)
+		s := &Stream{conn: c, id: call.PromiseID, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
 		c.streams[call.PromiseID] = s
 		c.streamMu.Unlock()
 		init := append([]byte(nil), call.Payload...) // payload aliases body
 		go func() {
 			h(call.Method, init, s)
-			_ = s.CloseSend() // handler done -> half-close
+			s.cancel()        // handler returned -> release its Context
+			_ = s.CloseSend() // half-close the send side
 		}()
 
 	case dirStreamMsg:
@@ -150,6 +166,7 @@ func (s *Stream) closeRecv() {
 	defer s.mu.Unlock()
 	if !s.recvDone {
 		s.recvDone = true
+		s.cancel() // peer half-closed -> release the handler's Context
 		close(s.recv)
 		s.conn.streamMu.Lock()
 		delete(s.conn.streams, s.id)

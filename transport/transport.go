@@ -116,6 +116,13 @@ type Conn struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// ctx is cancelled exactly when the connection closes; every server-side
+	// stream derives its Context from it, so a handler that blocks on
+	// Stream.Context().Done() (e.g. a long-lived subscription idle when the
+	// peer disconnects) is released instead of leaking.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewConn wraps an established stream (a *net.TCPConn / Unix conn, a
@@ -129,6 +136,7 @@ func NewConn(nc io.ReadWriteCloser, dispatch Dispatch) *Conn {
 // newConn is the full constructor; the streamHandler is set BEFORE the read
 // loop starts so an immediate inbound stream-open is never dropped.
 func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Conn{
 		nc:            nc,
 		dispatch:      dispatch,
@@ -137,6 +145,8 @@ func newConn(nc io.ReadWriteCloser, dispatch Dispatch, sh StreamHandler) *Conn {
 		streams:       make(map[uint32]*Stream),
 		sem:           make(chan struct{}, maxInFlight),
 		closed:        make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 	go c.readLoop()
 	return c
@@ -245,6 +255,7 @@ func (c *Conn) IsClosed() bool {
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.cancel() // release every stream handler blocked on its Context
 		_ = c.nc.Close()
 	})
 	return nil
