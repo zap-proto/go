@@ -230,20 +230,35 @@ func (n *Node) Call(ctx context.Context, peerID string, msg *Message) (*Message,
 	defer stopClose()
 
 	if _, err := conn.Write(msg.Bytes()); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, fmt.Errorf("zap: write to %s: %w", addr, err)
+		return nil, n.ctxOr(ctx, err, "write to "+addr)
 	}
 
 	resp, err := readFramedMessage(conn)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, fmt.Errorf("zap: read from %s: %w", addr, err)
+		return nil, n.ctxOr(ctx, err, "read from "+addr)
 	}
 	return resp, nil
+}
+
+// ctxOr maps an I/O error to the context's cancellation cause when the context
+// is responsible for it. Two timers race at a shared deadline: the socket
+// deadline we pinned to ctx.Deadline() can fire microseconds before ctx's own
+// timer flips ctx.Err(), so a bare `ctx.Err() != nil` check misses the case and
+// leaks a raw "i/o timeout". Since the socket deadline is ONLY ever the ctx
+// deadline (set above), a net timeout here IS the context deadline — surface it
+// as context.DeadlineExceeded so callers can errors.Is against it. A ctx already
+// reporting Canceled/DeadlineExceeded wins outright.
+func (n *Node) ctxOr(ctx context.Context, err error, what string) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		var nerr net.Error
+		if errors.As(err, &nerr) && nerr.Timeout() {
+			return context.DeadlineExceeded
+		}
+	}
+	return fmt.Errorf("zap: %s: %w", what, err)
 }
 
 // readFramedMessage reads exactly one ZAP message from r, using the header's
