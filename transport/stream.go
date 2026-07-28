@@ -25,7 +25,22 @@ type StreamHandler func(method uint32, init []byte, s Stream)
 type muxStream struct {
 	conn *muxConn
 	id   uint32
-	recv chan []byte
+
+	// Inbound messages are QUEUED, not handed to a fixed-size channel that the
+	// read loop blocks on. deliver() runs on muxConn.readLoop, and that loop
+	// carries every frame on the connection — other streams' frames and every
+	// unary response. If delivery can block, one slow stream consumer stalls
+	// the whole connection: on a pooled conn (one per peer address, shared by
+	// all callers) a single slow ListEntries froze every RPC in the process.
+	// It also deadlocks outright when a stream consumer's own next call rides
+	// the same connection, since the reply can never be read.
+	//
+	// So: append + wake, never block. maxStreamQueue bounds the memory a
+	// runaway producer can pin, and overflowing FAILS THAT ONE STREAM instead
+	// of the connection everyone shares.
+	queue    [][]byte
+	notify   chan struct{} // buffered(1) wakeup for a waiting Recv
+	overflow bool
 
 	// ctx is cancelled when the stream ends (half-close / handler return) OR
 	// the connection drops (it derives from conn.ctx). A streaming handler
@@ -50,7 +65,7 @@ func (s *muxStream) Context() context.Context { return s.ctx }
 func (c *muxConn) OpenStream(method uint32, init []byte) (Stream, error) {
 	id := c.NextPromiseID()
 	sctx, scancel := context.WithCancel(c.ctx)
-	s := &muxStream{conn: c, id: id, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
+	s := &muxStream{conn: c, id: id, notify: make(chan struct{}, 1), ctx: sctx, cancel: scancel}
 	c.streamMu.Lock()
 	c.streams[id] = s
 	c.streamMu.Unlock()
@@ -81,7 +96,7 @@ func (c *muxConn) routeStream(dir byte, body []byte) {
 			return // not a stream server
 		}
 		sctx, scancel := context.WithCancel(c.ctx)
-		s := &muxStream{conn: c, id: call.PromiseID, recv: make(chan []byte, 16), ctx: sctx, cancel: scancel}
+		s := &muxStream{conn: c, id: call.PromiseID, notify: make(chan struct{}, 1), ctx: sctx, cancel: scancel}
 		c.streams[call.PromiseID] = s
 		c.streamMu.Unlock()
 		init := append([]byte(nil), call.Payload...) // payload aliases body
@@ -100,10 +115,7 @@ func (c *muxConn) routeStream(dir byte, body []byte) {
 		s := c.streams[id]
 		c.streamMu.Unlock()
 		if s != nil {
-			select {
-			case s.recv <- body[4:]:
-			case <-c.closed:
-			}
+			s.deliver(body[4:])
 		}
 
 	case dirStreamEnd:
@@ -147,14 +159,67 @@ func (s *muxStream) CloseSend() error {
 // Recv returns the next inbound message, io.EOF once the peer half-closes,
 // or [ErrClosed] if the connection drops.
 func (s *muxStream) Recv() ([]byte, error) {
-	select {
-	case msg, ok := <-s.recv:
-		if !ok {
+	for {
+		s.mu.Lock()
+		if len(s.queue) > 0 {
+			msg := s.queue[0]
+			s.queue[0] = nil // release the reference as we advance
+			s.queue = s.queue[1:]
+			s.mu.Unlock()
+			return msg, nil
+		}
+		over, done := s.overflow, s.recvDone
+		s.mu.Unlock()
+
+		// Drain fully before reporting the end, so a half-close or an overflow
+		// never discards messages already queued ahead of it.
+		if over {
+			return nil, ErrStreamOverflow
+		}
+		if done {
 			return nil, io.EOF
 		}
-		return msg, nil
-	case <-s.conn.closed:
-		return nil, ErrClosed
+		select {
+		case <-s.notify:
+		case <-s.conn.closed:
+			return nil, ErrClosed
+		}
+	}
+}
+
+// maxStreamQueue bounds the messages one stream may hold undelivered. It is
+// generous because the normal cause of a backlog is a consumer briefly busy,
+// not a runaway peer; the point of the bound is only to keep a pathological
+// producer from pinning memory without limit.
+const maxStreamQueue = 8192
+
+// deliver queues one inbound message. It NEVER blocks: it runs on the
+// connection's read loop, which must keep draining for every other stream and
+// every unary reply on that connection.
+func (s *muxStream) deliver(msg []byte) {
+	s.mu.Lock()
+	if s.recvDone || s.overflow {
+		s.mu.Unlock()
+		return
+	}
+	if len(s.queue) >= maxStreamQueue {
+		s.overflow = true
+		s.mu.Unlock()
+		s.cancel() // release a handler waiting on Context
+		s.wake()
+		return
+	}
+	s.queue = append(s.queue, msg)
+	s.mu.Unlock()
+	s.wake()
+}
+
+// wake nudges a blocked Recv. The channel is buffered(1) and coalescing: a
+// pending wakeup already covers any number of queued messages.
+func (s *muxStream) wake() {
+	select {
+	case s.notify <- struct{}{}:
+	default:
 	}
 }
 
@@ -164,7 +229,7 @@ func (s *muxStream) closeRecv() {
 	if !s.recvDone {
 		s.recvDone = true
 		s.cancel() // peer half-closed -> release the handler's Context
-		close(s.recv)
+		s.wake()   // a blocked Recv must observe the end and drain what remains
 		s.conn.streamMu.Lock()
 		delete(s.conn.streams, s.id)
 		s.conn.streamMu.Unlock()

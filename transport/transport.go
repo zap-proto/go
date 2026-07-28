@@ -91,6 +91,11 @@ const maxInFlight = 256
 // (locally via [Conn.Close] or by the peer) before the response arrives.
 var ErrClosed = errors.New("transport: connection closed")
 
+// ErrStreamOverflow ends a stream whose consumer fell far enough behind that
+// its inbound queue hit maxStreamQueue. It fails THAT stream only — the
+// connection keeps serving every other stream and call on it.
+var ErrStreamOverflow = errors.New("transport: stream receive queue overflow")
+
 // Dispatch turns a request envelope into a response envelope. It matches
 // the signature of the codegen-emitted DispatchX functions bound to a
 // handler — e.g. `func(env []byte) ([]byte, error) { return DispatchEcho(h,
