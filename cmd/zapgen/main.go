@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/zap-proto/go/idl"
 )
 
 func main() {
@@ -54,7 +56,7 @@ func run(input, outDir string, single bool, typeSuffix string) error {
 	if err != nil {
 		return err
 	}
-	file, err := Parse(input, src)
+	file, err := idl.Parse(input, src)
 	if err != nil {
 		return err
 	}
@@ -65,11 +67,11 @@ func run(input, outDir string, single bool, typeSuffix string) error {
 		// Patch nested-struct references to the renamed types.
 		for _, s := range file.Structs {
 			for _, f := range s.Fields {
-				if f.Type.Kind == KindStruct {
+				if f.Type.Kind == idl.KindStruct {
 					f.Type.StructName += typeSuffix
 				}
-				if f.Type.Kind == KindList && f.Type.ListElem != nil &&
-					f.Type.ListElem.Kind == KindStruct {
+				if f.Type.Kind == idl.KindList && f.Type.ListElem != nil &&
+					f.Type.ListElem.Kind == idl.KindStruct {
 					f.Type.ListElem.StructName += typeSuffix
 				}
 			}

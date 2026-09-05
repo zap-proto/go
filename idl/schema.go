@@ -1,7 +1,7 @@
 // Copyright (C) 2025, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-package main
+package idl
 
 // AST types for the .zap schema DSL.
 //
@@ -11,6 +11,9 @@ package main
 
 // File is the parsed contents of one .zap source file.
 type File struct {
+	// Doc is the comment block above the `package` line: what this schema
+	// is for, in the author's words, carried into every projection of it.
+	Doc        []string
 	Package    string
 	Source     string          // basename of the input .zap file, for the // source: header
 	Aliases    map[string]Type // alias name → resolved type
@@ -21,6 +24,9 @@ type File struct {
 // Interface is one declared RPC service: a named set of methods whose
 // ordinals are auto-assigned 1, 2, 3, … in declaration order.
 type Interface struct {
+	// Doc is the comment block above the `interface` line — what the
+	// service is, said once, where the service is declared.
+	Doc     []string
 	Name    string
 	Methods []*Method
 }
@@ -33,6 +39,9 @@ type Interface struct {
 // it is empty). A ZAP method carries at most one struct payload per
 // direction.
 type Method struct {
+	// Doc is the comment block above the method — the one description a
+	// docs page, an OpenAPI summary and an MCP tool all answer with.
+	Doc      []string
 	Name     string
 	Ordinal  int
 	Request  *Param
@@ -48,6 +57,8 @@ type Param struct {
 
 // Struct is one declared struct.
 type Struct struct {
+	// Doc is the comment block above the `struct` line.
+	Doc    []string
 	Name   string
 	Fields []*Field
 }
@@ -55,6 +66,8 @@ type Struct struct {
 // Field is one struct field. Offset is author-controlled (the @N
 // annotation in the schema) and emitted as a generated constant.
 type Field struct {
+	// Doc is the comment block above the field.
+	Doc    []string
 	Name   string
 	Type   Type
 	Offset int

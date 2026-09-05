@@ -1,11 +1,12 @@
 // Copyright (C) 2025, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-package main
+package idl
 
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -48,27 +49,86 @@ type parser struct {
 	line     int
 	filename string
 	file     *File
+
+	// doc holds the comment lines skipSpace has read since the last thing
+	// that was not a comment. A declaration takes them (see takeDoc); a
+	// blank line drops them, which is how an author separates a remark
+	// about the file from the documentation of what comes next.
+	doc []string
+}
+
+// takeDoc returns the doc comment accumulated ahead of the declaration
+// about to be parsed, and clears it. Returning nil when there is none
+// keeps "undocumented" distinguishable from "documented with nothing".
+func (p *parser) takeDoc() []string {
+	if len(p.doc) == 0 {
+		return nil
+	}
+	d := p.doc
+	p.doc = nil
+	return d
+}
+
+// atLineStart reports whether only whitespace separates pos from the
+// start of its line. A '#' that fails this test is a remark ABOUT the
+// code to its left, not documentation of what follows, so it is read and
+// discarded rather than attached to the next declaration.
+func (p *parser) atLineStart() bool {
+	for i := p.pos - 1; i >= 0; i-- {
+		switch p.src[i] {
+		case '\n':
+			return true
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (p *parser) errf(format string, args ...any) error {
 	return fmt.Errorf("%s:%d: %s", p.filename, p.line, fmt.Sprintf(format, args...))
 }
 
-// skipSpace advances past whitespace and # comments.
+// skipSpace advances past whitespace and # comments, KEEPING the comments
+// that document what comes next.
+//
+// A schema that threw its comments away could describe a wire perfectly and
+// still leave every projection of it — the docs page, the OpenAPI summary,
+// the MCP tool description — with nothing to say. Then each projection grows
+// its own hand-written description, the descriptions drift from the schema
+// and from each other, and the schema stops being the source of anything but
+// bytes. So the words travel with the shape.
+//
+// Two rules decide what is documentation. A '#' that opens its line
+// documents the next declaration; a '#' after code on the same line is a
+// remark about that code and is dropped. A blank line ends a comment block,
+// so a note at the top of a file does not become the doc of the first
+// struct under it.
 func (p *parser) skipSpace() {
+	blank := true // nothing but whitespace seen on the current line yet
 	for p.pos < len(p.src) {
 		c := p.src[p.pos]
 		switch {
 		case c == '\n':
+			if blank {
+				p.doc = nil
+			}
+			blank = true
 			p.line++
 			p.pos++
 		case c == ' ' || c == '\t' || c == '\r':
 			p.pos++
 		case c == '#':
-			// Comment to end of line.
+			doc := p.atLineStart()
+			start := p.pos + 1
 			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
 				p.pos++
 			}
+			if doc {
+				p.doc = append(p.doc, strings.TrimSpace(string(p.src[start:p.pos])))
+			}
+			blank = false
 		default:
 			return
 		}
@@ -165,6 +225,7 @@ func (p *parser) parseFile() (*File, error) {
 	if !p.peekKeyword("package") {
 		return nil, p.errf("expected `package` declaration")
 	}
+	p.file.Doc = p.takeDoc()
 	p.pos += len("package")
 	p.skipSpace()
 	name, ok := p.readIdent()
@@ -228,6 +289,7 @@ func (p *parser) parseAlias() error {
 
 // parseStruct := 'struct' Ident '{' Field* '}'
 func (p *parser) parseStruct() (*Struct, error) {
+	doc := p.takeDoc()
 	p.pos += len("struct")
 	p.skipSpace()
 	name, ok := p.readIdent()
@@ -238,7 +300,7 @@ func (p *parser) parseStruct() (*Struct, error) {
 	if err := p.expect("{"); err != nil {
 		return nil, err
 	}
-	s := &Struct{Name: name}
+	s := &Struct{Doc: doc, Name: name}
 	for {
 		p.skipSpace()
 		if p.pos >= len(p.src) {
@@ -260,6 +322,7 @@ func (p *parser) parseStruct() (*Struct, error) {
 //
 // Method ordinals are auto-assigned 1, 2, 3, … in declaration order.
 func (p *parser) parseInterface() (*Interface, error) {
+	doc := p.takeDoc()
 	p.pos += len("interface")
 	p.skipSpace()
 	name, ok := p.readIdent()
@@ -270,7 +333,7 @@ func (p *parser) parseInterface() (*Interface, error) {
 	if err := p.expect("{"); err != nil {
 		return nil, err
 	}
-	iface := &Interface{Name: name}
+	iface := &Interface{Doc: doc, Name: name}
 	ordinal := 1
 	for {
 		p.skipSpace()
@@ -297,6 +360,7 @@ func (p *parser) parseInterface() (*Interface, error) {
 // The request param list and the optional `returns` param list each hold
 // at most one struct param — ZAP method payloads are a single struct.
 func (p *parser) parseMethod(ordinal int) (*Method, error) {
+	doc := p.takeDoc()
 	name, ok := p.readIdent()
 	if !ok {
 		return nil, p.errf("expected method name")
@@ -316,7 +380,7 @@ func (p *parser) parseMethod(ordinal int) (*Method, error) {
 			return nil, err
 		}
 	}
-	return &Method{Name: name, Ordinal: ordinal, Request: request, Response: response}, nil
+	return &Method{Doc: doc, Name: name, Ordinal: ordinal, Request: request, Response: response}, nil
 }
 
 // parseParamList parses `( name : StructType )` or `()`. Returns nil for
@@ -356,6 +420,7 @@ func (p *parser) parseParamList() (*Param, error) {
 
 // parseField := Ident Type '@' Int
 func (p *parser) parseField() (*Field, error) {
+	doc := p.takeDoc()
 	name, ok := p.readIdent()
 	if !ok {
 		return nil, p.errf("expected field name")
@@ -374,7 +439,7 @@ func (p *parser) parseField() (*Field, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Field{Name: name, Type: t, Offset: off}, nil
+	return &Field{Doc: doc, Name: name, Type: t, Offset: off}, nil
 }
 
 // parseType parses one type expression.

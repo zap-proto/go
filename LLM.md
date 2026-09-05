@@ -45,15 +45,40 @@ Three sibling packages ship alongside the root codec:
 constants, version policy. This Go runtime is one of N language
 runtimes implementing that spec.
 
+## Where the schema lives
+
+`github.com/zap-proto/go/idl` — the `.zap` grammar, its AST and the
+desugarer, as an IMPORTABLE package. Anything that wants to read a schema
+imports this; nothing needs to shell out to a code generator or write a
+second parser. It lived inside `cmd/zapgen` as `package main` until the
+day someone needed a schema in another program and could not have one —
+which is how a repository ends up with a parser per projection, each with
+its own idea of the grammar.
+
+A schema carries its own words. `File`, `Struct`, `Field`, `Interface`
+and `Method` each hold `Doc`, the `#` comment block written above the
+declaration. A `#` that opens its line documents what follows; a `#`
+after code on the same line is a remark about that code and is dropped; a
+blank line ends a comment block. That is what makes every projection of a
+schema self-documenting from ONE description instead of growing its own.
+
 ## Where the codegen lives
 
-`github.com/zap-proto/go/cmd/zapgen` — shipped and tested. It parses
-`.zap` schemas (brace + whitespace forms, one parser via `desugar.go`)
-and emits Go: per-struct View/Builder, and per-`interface` a typed RPC
-client + abstract dispatch server + 1-based ordinal table over the `rpc`
-envelope. Drop a `//go:generate zapgen schema.zap` line in the consuming
-package; `examples/echo` is a worked end-to-end demo (generated code +
-in-memory client/server round-trip test).
+`github.com/zap-proto/go/cmd/zapgen` — shipped and tested. It reads a
+schema through `idl` and emits Go: per-struct View/Builder, and
+per-`interface` a typed RPC client + abstract dispatch server + 1-based
+ordinal table over the `rpc` envelope. The schema's `Doc` becomes the
+package, type, accessor and method comment in the emitted source, so the
+sentence a reader sees is the sentence the schema author wrote. Drop a
+`//go:generate zapgen schema.zap` line in the consuming package;
+`examples/echo` is a worked end-to-end demo (generated code + in-memory
+client/server round-trip test), and `testdata/documented.zap` is the
+worked example of comments travelling into the output.
+
+Generation runs one way — schema to output, never output to schema.
+`cmd/zapgen/direction_test.go` pins it: a sentence that exists only in a
+schema appears in the emitted Go, and vanishes from it when the schema
+stops saying it.
 
 ### Schema syntax — two equivalent forms, one parser
 

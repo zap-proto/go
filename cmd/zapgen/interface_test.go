@@ -6,6 +6,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/zap-proto/go/idl"
 )
 
 // TestParseInterfaceBrace parses the brace form of an interface and checks
@@ -21,7 +23,7 @@ interface Svc {
     quux()
 }
 `
-	f, err := Parse("svc.zap", []byte(src))
+	f, err := idl.Parse("svc.zap", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -89,11 +91,11 @@ interface Svc
     baz() returns (out: B)
     quux()
 `
-	bf, err := Parse("brace.zap", []byte(brace))
+	bf, err := idl.Parse("brace.zap", []byte(brace))
 	if err != nil {
 		t.Fatalf("parse brace: %v", err)
 	}
-	wf, err := Parse("ws.zap", []byte(ws))
+	wf, err := idl.Parse("ws.zap", []byte(ws))
 	if err != nil {
 		t.Fatalf("parse ws: %v", err)
 	}
@@ -129,7 +131,7 @@ interface Svc
 	}
 }
 
-func paramStruct(p *Param) string {
+func paramStruct(p *idl.Param) string {
 	if p == nil {
 		return ""
 	}
@@ -137,7 +139,7 @@ func paramStruct(p *Param) string {
 }
 
 // EmitSingle2 is a test shim returning the combined output as a string.
-func EmitSingle2(f *File) (string, error) {
+func EmitSingle2(f *idl.File) (string, error) {
 	_, b, err := EmitSingle(f)
 	return string(b), err
 }
@@ -149,7 +151,7 @@ func EmitSingle2(f *File) (string, error) {
 func TestInterfaceWhitespaceBlockOpener(t *testing.T) {
 	// `interface Svc` then indented methods -> interface with 1 method.
 	src := "package p\ninterface Svc\n    ping()\n"
-	f, err := Parse("p.zap", []byte(src))
+	f, err := idl.Parse("p.zap", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -159,7 +161,7 @@ func TestInterfaceWhitespaceBlockOpener(t *testing.T) {
 
 	// `interface text` as a struct field (has a type) stays a field.
 	src2 := "package p\nstruct S\n    interface text\n    B u8\n"
-	f2, err := Parse("p2.zap", []byte(src2))
+	f2, err := idl.Parse("p2.zap", []byte(src2))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -185,7 +187,7 @@ func TestInterfaceErrors(t *testing.T) {
 	for name, in := range cases {
 		in := in
 		t.Run(name, func(t *testing.T) {
-			f, perr := Parse("t.zap", []byte(in))
+			f, perr := idl.Parse("t.zap", []byte(in))
 			if perr != nil {
 				return // parse-time rejection is acceptable
 			}
@@ -201,7 +203,7 @@ func TestInterfaceErrors(t *testing.T) {
 // name are refused at emit (they would generate colliding Go identifiers).
 func TestInterfaceDuplicateMethodRejected(t *testing.T) {
 	src := "package p\ninterface S {\n  f()\n  f()\n}\n"
-	f, err := Parse("t.zap", []byte(src))
+	f, err := idl.Parse("t.zap", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

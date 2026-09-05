@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/zap-proto/go/idl"
 )
 
 var update = flag.Bool("update", false, "update golden files")
@@ -33,7 +35,7 @@ func TestGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", in, err)
 			}
-			file, err := Parse(in, src)
+			file, err := idl.Parse(in, src)
 			if err != nil {
 				t.Fatalf("parse %s: %v", in, err)
 			}
@@ -119,7 +121,7 @@ func emitAll(t *testing.T, path, srcName string) map[string][]byte {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	file, err := Parse(path, src)
+	file, err := idl.Parse(path, src)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
