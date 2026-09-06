@@ -28,21 +28,29 @@ func SignedOf(b []byte) (string, error) {
 	fmt.Fprintf(&w, "type=%d;shape=%d;unsigned=%d;creds=%d;credbytes=%d",
 		b[0], b[1], len(t.Unsigned()), t.CredentialCount(), len(t.CredentialBytes()))
 
-	inner := t.Unsigned()
+	tx, err := WrapTx(t.Unsigned())
+	if err != nil {
+		fmt.Fprintf(&w, ";tx{unreadable}")
+		return w.String(), nil
+	}
+	fmt.Fprintf(&w, ";kind=%d", tx.Kind())
+	inner := tx.BaseTx()
 	if len(inner) > Prefix {
 		if base, err := WrapBase(inner[Prefix:]); err == nil {
 			fmt.Fprintf(&w, ";base{itype=%d;ishape=%d;net=%d;chain=%x;memo=%x;outs=%d[",
 				inner[0], inner[1], base.NetworkID(), base.BlockchainID(), base.Memo(), base.Outs().Len())
 			outs := base.Outs()
 			for i := 0; i < outs.Len(); i++ {
-				p := outs.At(i)
-				fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
+				o := outs.At(i)
+				a := o.AssetID()
+				fmt.Fprintf(&w, "%d:asset=%x,out=%x;", i, a[:], o.Output())
 			}
 			ins := base.Ins()
 			fmt.Fprintf(&w, "];ins=%d[", ins.Len())
 			for i := 0; i < ins.Len(); i++ {
-				p := ins.At(i)
-				fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
+				n := ins.At(i)
+				tx, a := n.TxID(), n.AssetID()
+				fmt.Fprintf(&w, "%d:tx=%x,idx=%d,asset=%x,in=%x;", i, tx[:], n.OutputIndex(), a[:], n.Input())
 			}
 			w.WriteString("]}")
 		} else {
@@ -84,8 +92,7 @@ func BlockOf(b []byte) (string, error) {
 	lens := t.TxLengths()
 	fmt.Fprintf(&w, ";txlens=%d[", lens.Len())
 	for i := 0; i < lens.Len(); i++ {
-		p := lens.At(i)
-		fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
+		fmt.Fprintf(&w, "%d:%d;", i, lens.Uint32At(i))
 	}
 	w.WriteString("]")
 	return w.String(), nil

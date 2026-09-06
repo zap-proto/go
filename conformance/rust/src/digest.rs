@@ -306,7 +306,15 @@ pub fn signed_of(b: &[u8]) -> Result<String, zap::Error> {
         t.credential_bytes().len()
     ));
 
-    let inner = t.unsigned();
+    let tx = match x::Tx::wrap(t.unsigned()) {
+        Ok(tx) => tx,
+        Err(_) => {
+            w.push_str(";tx{unreadable}");
+            return Ok(w);
+        }
+    };
+    w.push_str(&format!(";kind={}", tx.kind()));
+    let inner = tx.base_tx();
     if inner.len() > PREFIX {
         match x::Base::wrap(&inner[PREFIX..]) {
             Ok(base) => {
@@ -321,14 +329,24 @@ pub fn signed_of(b: &[u8]) -> Result<String, zap::Error> {
                     outs.len()
                 ));
                 for i in 0..outs.len() {
-                    let ptr = outs.at(i);
-                    w.push_str(&format!("{i}:{};", ptr.offset()));
+                    let o = outs.at(i);
+                    w.push_str(&format!(
+                        "{i}:asset={},out={};",
+                        hex(o.asset_id()),
+                        hex(o.output())
+                    ));
                 }
                 let ins = base.ins();
                 w.push_str(&format!("];ins={}[", ins.len()));
                 for i in 0..ins.len() {
-                    let ptr = ins.at(i);
-                    w.push_str(&format!("{i}:{};", ptr.offset()));
+                    let n = ins.at(i);
+                    w.push_str(&format!(
+                        "{i}:tx={},idx={},asset={},in={};",
+                        hex(n.tx_id()),
+                        n.output_index(),
+                        hex(n.asset_id()),
+                        hex(n.input())
+                    ));
                 }
                 w.push_str("]}");
             }
@@ -366,8 +384,7 @@ pub fn x_block_of(b: &[u8]) -> Result<String, zap::Error> {
     let lens = t.tx_lengths();
     w.push_str(&format!(";txlens={}[", lens.len()));
     for i in 0..lens.len() {
-        let ptr = lens.at(i);
-        w.push_str(&format!("{i}:{};", ptr.offset()));
+        w.push_str(&format!("{i}:{};", lens.u32(i)));
     }
     w.push(']');
     Ok(w)

@@ -85,6 +85,72 @@ pub fn new_signed(input: &SignedInput<'_>) -> Vec<u8> {
     b.finish()
 }
 
+// Tx — field offsets, in bytes, and the fixed section's size.
+pub const TX_KIND: usize = 0;
+pub const TX_BASE_TX: usize = 8;
+pub const TX_SIZE: usize = 16;
+
+/// A view of a ZAP-encoded Tx. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct Tx<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> Tx<'a> {
+    /// Take `data` as a Tx message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(Tx {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        Tx { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    pub fn kind(&self) -> u8 {
+        self.o.u8(TX_KIND)
+    }
+
+    pub fn base_tx(&self) -> &'a [u8] {
+        self.o.bytes(TX_BASE_TX)
+    }
+}
+
+/// The field values [`new_tx`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TxInput<'a> {
+    pub kind: u8,
+    pub base_tx: &'a [u8],
+}
+
+impl<'a> Default for TxInput<'a> {
+    fn default() -> Self {
+        TxInput {
+            kind: 0,
+            base_tx: &[],
+        }
+    }
+}
+
+/// Write a Tx message and answer its bytes.
+pub fn new_tx(input: &TxInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut ob = b.start_object(TX_SIZE);
+    ob.set_u8(&mut b, TX_KIND, input.kind);
+    ob.set_bytes(&mut b, TX_BASE_TX, input.base_tx);
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+
 // Base — field offsets, in bytes, and the fixed section's size.
 pub const BASE_NETWORK_ID: usize = 0;
 pub const BASE_BLOCKCHAIN_ID: usize = 8;
@@ -131,12 +197,12 @@ impl<'a> Base<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn outs(&self) -> PtrList<'a> {
-        PtrList { l: self.o.list_stride(BASE_OUTS, PTR_SIZE) }
+    pub fn outs(&self) -> TransferableOutList<'a> {
+        TransferableOutList { l: self.o.list_stride(BASE_OUTS, 4) }
     }
 
-    pub fn ins(&self) -> PtrList<'a> {
-        PtrList { l: self.o.list_stride(BASE_INS, PTR_SIZE) }
+    pub fn ins(&self) -> TransferableInList<'a> {
+        TransferableInList { l: self.o.list_stride(BASE_INS, 4) }
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -171,23 +237,25 @@ pub fn new_base(input: &BaseInput<'_>) -> Vec<u8> {
     let mut b = zap::Builder::new_v2(256);
     let mut at_outs = 0;
     if !input.outs.is_empty() {
-        let mut lb = b.start_list();
+        let mut aims = Vec::with_capacity(input.outs.len());
         for elem in input.outs {
-            let mut rec = [0u8; PTR_SIZE];
-            let n = elem.len().min(PTR_SIZE);
-            rec[..n].copy_from_slice(&elem[..n]);
-            lb.add_bytes(&mut b, &rec);
+            aims.push(b.embed(elem));
+        }
+        let mut lb = b.start_list();
+        for at in &aims {
+            lb.add_object_ptr(&mut b, *at);
         }
         at_outs = lb.finish_offset();
     }
     let mut at_ins = 0;
     if !input.ins.is_empty() {
-        let mut lb = b.start_list();
+        let mut aims = Vec::with_capacity(input.ins.len());
         for elem in input.ins {
-            let mut rec = [0u8; PTR_SIZE];
-            let n = elem.len().min(PTR_SIZE);
-            rec[..n].copy_from_slice(&elem[..n]);
-            lb.add_bytes(&mut b, &rec);
+            aims.push(b.embed(elem));
+        }
+        let mut lb = b.start_list();
+        for at in &aims {
+            lb.add_object_ptr(&mut b, *at);
         }
         at_ins = lb.finish_offset();
     }
@@ -201,21 +269,22 @@ pub fn new_base(input: &BaseInput<'_>) -> Vec<u8> {
     b.finish()
 }
 
-// Ptr — field offsets, in bytes, and the fixed section's size.
-pub const PTR_OFFSET: usize = 0;
-pub const PTR_SIZE: usize = 4;
+// TransferableOut — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_OUT_ASSET_ID: usize = 0;
+pub const TRANSFERABLE_OUT_OUTPUT: usize = 32;
+pub const TRANSFERABLE_OUT_SIZE: usize = 40;
 
-/// A view of a ZAP-encoded Ptr. Reading a field costs a bounds check.
+/// A view of a ZAP-encoded TransferableOut. Reading a field costs a bounds check.
 #[derive(Clone, Copy, Debug)]
-pub struct Ptr<'a> {
+pub struct TransferableOut<'a> {
     o: zap::Object<'a>,
 }
 
-impl<'a> Ptr<'a> {
-    /// Take `data` as a Ptr message. Fails only on the wire-level
+impl<'a> TransferableOut<'a> {
+    /// Take `data` as a TransferableOut message. Fails only on the wire-level
     /// checks — magic, version, declared size.
     pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
-        Ok(Ptr {
+        Ok(TransferableOut {
             o: zap::Message::parse(data)?.root(),
         })
     }
@@ -223,7 +292,7 @@ impl<'a> Ptr<'a> {
     /// A view of an object already located in a message — a nested
     /// field, or one element of a list.
     pub fn new(o: zap::Object<'a>) -> Self {
-        Ptr { o }
+        TransferableOut { o }
     }
 
     /// The object this view reads.
@@ -231,23 +300,26 @@ impl<'a> Ptr<'a> {
         self.o
     }
 
-    pub fn offset(&self) -> u32 {
-        self.o.u32(PTR_OFFSET)
+    /// The 32 inline bytes at `TRANSFERABLE_OUT_ASSET_ID`; zeros if the span runs off the buffer.
+    pub fn asset_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_OUT_ASSET_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
     }
 
-    /// The PTR_SIZE bytes this Ptr occupies where it lies.
-    pub fn record(&self) -> &'a [u8] {
-        self.o.bytes_fixed(0, PTR_SIZE)
+    pub fn output(&self) -> &'a [u8] {
+        self.o.bytes(TRANSFERABLE_OUT_OUTPUT)
     }
 }
 
-/// A run of Ptr records, PTR_SIZE bytes each.
+/// A run of four-byte offsets, each aiming at one TransferableOut.
 #[derive(Clone, Copy, Debug)]
-pub struct PtrList<'a> {
+pub struct TransferableOutList<'a> {
     l: zap::List<'a>,
 }
 
-impl<'a> PtrList<'a> {
+impl<'a> TransferableOutList<'a> {
     /// How many elements the list holds.
     pub fn len(&self) -> usize {
         self.l.len()
@@ -258,31 +330,147 @@ impl<'a> PtrList<'a> {
         self.l.len() == 0
     }
 
-    /// Element `i`, or the absent Ptr past the end.
-    pub fn at(&self, i: usize) -> Ptr<'a> {
-        Ptr::new(self.l.object(i, PTR_SIZE))
+    /// Element `i`, or the absent TransferableOut past the end.
+    pub fn at(&self, i: usize) -> TransferableOut<'a> {
+        TransferableOut::new(self.l.object_ptr(i))
     }
 }
 
-/// The field values [`new_ptr`] writes.
+/// The field values [`new_transferable_out`] writes.
 #[derive(Clone, Copy, Debug)]
-pub struct PtrInput {
-    pub offset: u32,
+pub struct TransferableOutInput<'a> {
+    pub asset_id: &'a [u8; 32],
+    pub output: &'a [u8],
 }
 
-impl Default for PtrInput {
+impl<'a> Default for TransferableOutInput<'a> {
     fn default() -> Self {
-        PtrInput {
-            offset: 0,
+        TransferableOutInput {
+            asset_id: &[0u8; 32],
+            output: &[],
         }
     }
 }
 
-/// Write a Ptr message and answer its bytes.
-pub fn new_ptr(input: &PtrInput) -> Vec<u8> {
+/// Write a TransferableOut message and answer its bytes.
+pub fn new_transferable_out(input: &TransferableOutInput<'_>) -> Vec<u8> {
     let mut b = zap::Builder::new_v2(256);
-    let mut ob = b.start_object(PTR_SIZE);
-    ob.set_u32(&mut b, PTR_OFFSET, input.offset);
+    let mut ob = b.start_object(TRANSFERABLE_OUT_SIZE);
+    ob.set_bytes_fixed(&mut b, TRANSFERABLE_OUT_ASSET_ID, input.asset_id);
+    ob.set_bytes(&mut b, TRANSFERABLE_OUT_OUTPUT, input.output);
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+
+// TransferableIn — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_IN_TX_ID: usize = 0;
+pub const TRANSFERABLE_IN_OUTPUT_INDEX: usize = 32;
+pub const TRANSFERABLE_IN_ASSET_ID: usize = 36;
+pub const TRANSFERABLE_IN_INPUT: usize = 68;
+pub const TRANSFERABLE_IN_SIZE: usize = 76;
+
+/// A view of a ZAP-encoded TransferableIn. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableIn<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> TransferableIn<'a> {
+    /// Take `data` as a TransferableIn message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(TransferableIn {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        TransferableIn { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    /// The 32 inline bytes at `TRANSFERABLE_IN_TX_ID`; zeros if the span runs off the buffer.
+    pub fn tx_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_IN_TX_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn output_index(&self) -> u32 {
+        self.o.u32(TRANSFERABLE_IN_OUTPUT_INDEX)
+    }
+
+    /// The 32 inline bytes at `TRANSFERABLE_IN_ASSET_ID`; zeros if the span runs off the buffer.
+    pub fn asset_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_IN_ASSET_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn input(&self) -> &'a [u8] {
+        self.o.bytes(TRANSFERABLE_IN_INPUT)
+    }
+}
+
+/// A run of four-byte offsets, each aiming at one TransferableIn.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> TransferableInList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent TransferableIn past the end.
+    pub fn at(&self, i: usize) -> TransferableIn<'a> {
+        TransferableIn::new(self.l.object_ptr(i))
+    }
+}
+
+/// The field values [`new_transferable_in`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInInput<'a> {
+    pub tx_id: &'a [u8; 32],
+    pub output_index: u32,
+    pub asset_id: &'a [u8; 32],
+    pub input: &'a [u8],
+}
+
+impl<'a> Default for TransferableInInput<'a> {
+    fn default() -> Self {
+        TransferableInInput {
+            tx_id: &[0u8; 32],
+            output_index: 0,
+            asset_id: &[0u8; 32],
+            input: &[],
+        }
+    }
+}
+
+/// Write a TransferableIn message and answer its bytes.
+pub fn new_transferable_in(input: &TransferableInInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut ob = b.start_object(TRANSFERABLE_IN_SIZE);
+    ob.set_bytes_fixed(&mut b, TRANSFERABLE_IN_TX_ID, input.tx_id);
+    ob.set_u32(&mut b, TRANSFERABLE_IN_OUTPUT_INDEX, input.output_index);
+    ob.set_bytes_fixed(&mut b, TRANSFERABLE_IN_ASSET_ID, input.asset_id);
+    ob.set_bytes(&mut b, TRANSFERABLE_IN_INPUT, input.input);
     ob.finish_as_root(&mut b);
     b.finish()
 }
@@ -346,8 +534,8 @@ impl<'a> Block<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn tx_lengths(&self) -> PtrList<'a> {
-        PtrList { l: self.o.list_stride(BLOCK_TX_LENGTHS, PTR_SIZE) }
+    pub fn tx_lengths(&self) -> zap::List<'a> {
+        self.o.list_stride(BLOCK_TX_LENGTHS, 4)
     }
 
     pub fn tx_blob(&self) -> &'a [u8] {
@@ -386,8 +574,8 @@ pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
     if !input.tx_lengths.is_empty() {
         let mut lb = b.start_list();
         for elem in input.tx_lengths {
-            let mut rec = [0u8; PTR_SIZE];
-            let n = elem.len().min(PTR_SIZE);
+            let mut rec = [0u8; 4];
+            let n = elem.len().min(4);
             rec[..n].copy_from_slice(&elem[..n]);
             lb.add_bytes(&mut b, &rec);
         }

@@ -50,6 +50,44 @@ func NewSigned(in SignedInput) []byte {
 }
 
 const (
+	txKindOff   = 0
+	txBaseTxOff = 8
+	txSize      = 16
+)
+
+// Tx is a zero-copy view into a ZAP-encoded Tx message.
+type Tx struct{ o zap.Object }
+
+// WrapTx parses b and returns a typed view. Returns an error if the
+// wire-level checks (magic, version, size) fail.
+func WrapTx(b []byte) (Tx, error) {
+	m, err := zap.Parse(b)
+	if err != nil {
+		return Tx{}, err
+	}
+	return Tx{o: m.Root()}, nil
+}
+
+func (t Tx) Kind() uint8    { return t.o.Uint8(txKindOff) }
+func (t Tx) BaseTx() []byte { return t.o.Bytes(txBaseTxOff) }
+
+// TxInput collects the field values for NewTx.
+type TxInput struct {
+	Kind   uint8
+	BaseTx []byte
+}
+
+// NewTx builds a ZAP-encoded Tx message from in and returns the bytes.
+func NewTx(in TxInput) []byte {
+	b := zap.NewBuilderV2(256)
+	ob := b.StartObject(txSize)
+	ob.SetUint8(txKindOff, in.Kind)
+	ob.SetBytes(txBaseTxOff, in.BaseTx)
+	ob.FinishAsRoot()
+	return b.Finish()
+}
+
+const (
 	baseNetworkIDOff    = 0
 	baseBlockchainIDOff = 8
 	baseOutsOff         = 40
@@ -77,9 +115,11 @@ func (t Base) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(baseBlockchainIDOff, 32))
 	return out
 }
-func (t Base) Outs() PtrList { return PtrList{l: t.o.ListStride(baseOutsOff, ptrSize)} }
-func (t Base) Ins() PtrList  { return PtrList{l: t.o.ListStride(baseInsOff, ptrSize)} }
-func (t Base) Memo() []byte  { return t.o.Bytes(baseMemoOff) }
+func (t Base) Outs() TransferableOutList {
+	return TransferableOutList{l: t.o.ListStride(baseOutsOff, 4)}
+}
+func (t Base) Ins() TransferableInList { return TransferableInList{l: t.o.ListStride(baseInsOff, 4)} }
+func (t Base) Memo() []byte            { return t.o.Bytes(baseMemoOff) }
 
 // BaseInput collects the field values for NewBase.
 type BaseInput struct {
@@ -95,21 +135,25 @@ func NewBase(in BaseInput) []byte {
 	b := zap.NewBuilderV2(256)
 	outsAt := 0
 	if len(in.Outs) > 0 {
-		lb := b.StartList(ptrSize)
+		aims := make([]int, 0, len(in.Outs))
 		for _, elem := range in.Outs {
-			var rec [ptrSize]byte
-			copy(rec[:], elem)
-			lb.AddBytes(rec[:])
+			aims = append(aims, b.Embed(elem))
+		}
+		lb := b.StartList(4)
+		for _, aim := range aims {
+			lb.AddObjectPtr(aim)
 		}
 		outsAt = lb.FinishOffset()
 	}
 	insAt := 0
 	if len(in.Ins) > 0 {
-		lb := b.StartList(ptrSize)
+		aims := make([]int, 0, len(in.Ins))
 		for _, elem := range in.Ins {
-			var rec [ptrSize]byte
-			copy(rec[:], elem)
-			lb.AddBytes(rec[:])
+			aims = append(aims, b.Embed(elem))
+		}
+		lb := b.StartList(4)
+		for _, aim := range aims {
+			lb.AddObjectPtr(aim)
 		}
 		insAt = lb.FinishOffset()
 	}
@@ -124,47 +168,115 @@ func NewBase(in BaseInput) []byte {
 }
 
 const (
-	ptrOffsetOff = 0
-	ptrSize      = 4
+	transferableOutAssetIDOff = 0
+	transferableOutOutputOff  = 32
+	transferableOutSize       = 40
 )
 
-// Ptr is a zero-copy view into a ZAP-encoded Ptr message.
-type Ptr struct{ o zap.Object }
+// TransferableOut is a zero-copy view into a ZAP-encoded TransferableOut message.
+type TransferableOut struct{ o zap.Object }
 
-// WrapPtr parses b and returns a typed view. Returns an error if the
+// WrapTransferableOut parses b and returns a typed view. Returns an error if the
 // wire-level checks (magic, version, size) fail.
-func WrapPtr(b []byte) (Ptr, error) {
+func WrapTransferableOut(b []byte) (TransferableOut, error) {
 	m, err := zap.Parse(b)
 	if err != nil {
-		return Ptr{}, err
+		return TransferableOut{}, err
 	}
-	return Ptr{o: m.Root()}, nil
+	return TransferableOut{o: m.Root()}, nil
 }
 
-func (t Ptr) Offset() uint32 { return t.o.Uint32(ptrOffsetOff) }
+func (t TransferableOut) AssetID() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(transferableOutAssetIDOff, 32))
+	return out
+}
+func (t TransferableOut) Output() []byte { return t.o.Bytes(transferableOutOutputOff) }
 
-// Record is the ptrSize bytes this Ptr occupies where it lies.
-func (t Ptr) Record() []byte { return t.o.BytesFixed(0, ptrSize) }
-
-// PtrList is a run of Ptr records, ptrSize bytes each.
-type PtrList struct{ l zap.List }
+// TransferableOutList is a run of four-byte offsets, each aiming at one TransferableOut.
+type TransferableOutList struct{ l zap.List }
 
 // Len is how many elements the list holds.
-func (x PtrList) Len() int { return x.l.Len() }
+func (x TransferableOutList) Len() int { return x.l.Len() }
 
-// At is element i, or the absent Ptr past the end.
-func (x PtrList) At(i int) Ptr { return Ptr{o: x.l.Object(i, ptrSize)} }
+// At is element i, or the absent TransferableOut past the end.
+func (x TransferableOutList) At(i int) TransferableOut { return TransferableOut{o: x.l.ObjectPtr(i)} }
 
-// PtrInput collects the field values for NewPtr.
-type PtrInput struct {
-	Offset uint32
+// TransferableOutInput collects the field values for NewTransferableOut.
+type TransferableOutInput struct {
+	AssetID [32]byte
+	Output  []byte
 }
 
-// NewPtr builds a ZAP-encoded Ptr message from in and returns the bytes.
-func NewPtr(in PtrInput) []byte {
+// NewTransferableOut builds a ZAP-encoded TransferableOut message from in and returns the bytes.
+func NewTransferableOut(in TransferableOutInput) []byte {
 	b := zap.NewBuilderV2(256)
-	ob := b.StartObject(ptrSize)
-	ob.SetUint32(ptrOffsetOff, in.Offset)
+	ob := b.StartObject(transferableOutSize)
+	ob.SetBytesFixed(transferableOutAssetIDOff, in.AssetID[:])
+	ob.SetBytes(transferableOutOutputOff, in.Output)
+	ob.FinishAsRoot()
+	return b.Finish()
+}
+
+const (
+	transferableInTxIDOff        = 0
+	transferableInOutputIndexOff = 32
+	transferableInAssetIDOff     = 36
+	transferableInInputOff       = 68
+	transferableInSize           = 76
+)
+
+// TransferableIn is a zero-copy view into a ZAP-encoded TransferableIn message.
+type TransferableIn struct{ o zap.Object }
+
+// WrapTransferableIn parses b and returns a typed view. Returns an error if the
+// wire-level checks (magic, version, size) fail.
+func WrapTransferableIn(b []byte) (TransferableIn, error) {
+	m, err := zap.Parse(b)
+	if err != nil {
+		return TransferableIn{}, err
+	}
+	return TransferableIn{o: m.Root()}, nil
+}
+
+func (t TransferableIn) TxID() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(transferableInTxIDOff, 32))
+	return out
+}
+func (t TransferableIn) OutputIndex() uint32 { return t.o.Uint32(transferableInOutputIndexOff) }
+func (t TransferableIn) AssetID() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(transferableInAssetIDOff, 32))
+	return out
+}
+func (t TransferableIn) Input() []byte { return t.o.Bytes(transferableInInputOff) }
+
+// TransferableInList is a run of four-byte offsets, each aiming at one TransferableIn.
+type TransferableInList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x TransferableInList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent TransferableIn past the end.
+func (x TransferableInList) At(i int) TransferableIn { return TransferableIn{o: x.l.ObjectPtr(i)} }
+
+// TransferableInInput collects the field values for NewTransferableIn.
+type TransferableInInput struct {
+	TxID        [32]byte
+	OutputIndex uint32
+	AssetID     [32]byte
+	Input       []byte
+}
+
+// NewTransferableIn builds a ZAP-encoded TransferableIn message from in and returns the bytes.
+func NewTransferableIn(in TransferableInInput) []byte {
+	b := zap.NewBuilderV2(256)
+	ob := b.StartObject(transferableInSize)
+	ob.SetBytesFixed(transferableInTxIDOff, in.TxID[:])
+	ob.SetUint32(transferableInOutputIndexOff, in.OutputIndex)
+	ob.SetBytesFixed(transferableInAssetIDOff, in.AssetID[:])
+	ob.SetBytes(transferableInInputOff, in.Input)
 	ob.FinishAsRoot()
 	return b.Finish()
 }
@@ -204,8 +316,8 @@ func (t Block) Root() [32]byte {
 	copy(out[:], t.o.BytesFixed(blockRootOff, 32))
 	return out
 }
-func (t Block) TxLengths() PtrList { return PtrList{l: t.o.ListStride(blockTxLengthsOff, ptrSize)} }
-func (t Block) TxBlob() []byte     { return t.o.Bytes(blockTxBlobOff) }
+func (t Block) TxLengths() zap.List { return t.o.ListStride(blockTxLengthsOff, 4) }
+func (t Block) TxBlob() []byte      { return t.o.Bytes(blockTxBlobOff) }
 
 // BlockInput collects the field values for NewBlock.
 type BlockInput struct {
@@ -222,9 +334,9 @@ func NewBlock(in BlockInput) []byte {
 	b := zap.NewBuilderV2(256)
 	txLengthsAt := 0
 	if len(in.TxLengths) > 0 {
-		lb := b.StartList(ptrSize)
+		lb := b.StartList(4)
 		for _, elem := range in.TxLengths {
-			var rec [ptrSize]byte
+			var rec [4]byte
 			copy(rec[:], elem)
 			lb.AddBytes(rec[:])
 		}

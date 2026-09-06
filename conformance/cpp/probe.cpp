@@ -280,7 +280,10 @@ std::string signed_of(View b) {
     std::string w = std::format("type={};shape={};unsigned={};creds={};credbytes={}", b[0], b[1],
                                 t->Unsigned().size(), t->CredentialCount(),
                                 t->CredentialBytes().size());
-    const auto inner = t->Unsigned();
+    auto tx = xchain::WrapTx(t->Unsigned());
+    if (!tx) return w + ";tx{unreadable}";
+    w += std::format(";kind={}", tx->Kind());
+    const auto inner = tx->BaseTx();
     if (inner.size() > kPrefix) {
         auto base = xchain::WrapBase(inner.subspan(kPrefix));
         if (base) {
@@ -289,12 +292,15 @@ std::string signed_of(View b) {
                              hex(base->Memo()), base->Outs().size());
             const auto outs = base->Outs();
             for (std::int64_t i = 0; i < outs.size(); ++i) {
-                w += std::format("{}:{};", i, outs.at(i).Offset());
+                const auto o = outs.at(i);
+                w += std::format("{}:asset={},out={};", i, hex(o.AssetID()), hex(o.Output()));
             }
             const auto ins = base->Ins();
             w += std::format("];ins={}[", ins.size());
             for (std::int64_t i = 0; i < ins.size(); ++i) {
-                w += std::format("{}:{};", i, ins.at(i).Offset());
+                const auto n = ins.at(i);
+                w += std::format("{}:tx={},idx={},asset={},in={};", i, hex(n.TxID()),
+                                 n.OutputIndex(), hex(n.AssetID()), hex(n.Input()));
             }
             w += "]}";
         } else {
@@ -325,7 +331,7 @@ std::string x_block_of(View b) {
     const auto lens = t->TxLengths();
     w += std::format(";txlens={}[", lens.size());
     for (std::int64_t i = 0; i < lens.size(); ++i) {
-        w += std::format("{}:{};", i, lens.at(i).Offset());
+        w += std::format("{}:{};", i, lens.u32(i));
     }
     w += "]";
     return w;
