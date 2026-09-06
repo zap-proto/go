@@ -119,6 +119,47 @@ And one thing every backend spells rather than defaults: **a
 for a buffer too short to hold it, so the C++ span accessor answers a zero
 span of length N rather than an empty one.
 
+### What a list is on the wire
+
+A list carries its elements one of two ways, and which one is a property of
+the ELEMENT, not a flag anyone writes:
+
+| element | shape |
+|---------|-------|
+| a scalar, a `bytes_fixed[N]`, a struct whose every field is one of those | **stride** — records at that width, back to back |
+| `bytes`, `text`, a struct with a tail | **length** — each entry behind a four-byte little-endian length |
+
+`Resolve` in `schema.go` settles it once, in the front end, and every backend
+reads the answer. No annotation decides it and none could: a schema that had
+to be told which shape it meant would be a schema that could be told wrong. A
+list of a struct the file does not declare, and a list of lists, are refused
+by name rather than given a shape by default.
+
+Stride is what every Lux chain writes — a P transaction holds a run of
+72-byte outputs, of 96-byte inputs, of 20-byte addresses, of 4-byte indices —
+so a generator that wrote length-prefixed entries could not replace the
+hand-written wire, only sit beside it.
+
+A list answers its own element type: `t.Outs()` is an `OutList`, `.At(i)` is
+an `Out`, and `list.Object(i, SIZE)` is written by nobody. A record answers
+its own bytes (`Record()`), which is what putting one back needs. The reader
+asks for the bound its width affords — `ListStride` — so a peer's count that
+cannot fit stride bytes per element is refused once, where before it only had
+to be smaller than the message for every loop over it to run that many times.
+
+Three more things every backend does the same way, because the bytes are the
+chain's bytes or they are nothing:
+
+- **The tails go first.** What a pointer will name is written in field order
+  and the object last, so a pointer leads backward into bytes already down.
+- **A nested struct names its ROOT.** `Embed` copies the message the caller
+  built and answers where its root landed; a pointer to the head of the copy
+  names the copy's header, and the first field reads back as `0x0050415A`,
+  which is "ZAP".
+- **The version is spelled, not defaulted.** The runtimes default
+  differently; 2 is what every Lux message on the wire carries, so 2 is what
+  every backend stamps.
+
 ### The proof that the backends agree
 
 `conformance/` — not a unit test, a differential. Every backend is
@@ -138,10 +179,33 @@ vector is read field by field, written back out through the emitted
 builder, and read again. `conformance/schema/` states the P and X wire
 as schemas — offsets taken from node2's hand-written Rust — and the
 emitted sizes come out equal to the strides that code states by hand
-(Out 72, In 96, Addr 20, Sig 4, Spend 77, P block 73, X block 96).
+(Out 72, In 96, Addr 20, Sig 4, Spend 77, Import 125, Export 125,
+P block 73, X block 96).
 
 `conformance/schema/kitchen.zap` carries every type the dialect has, so
 the build side is exercised beyond the handful a chain happens to use.
+
+And then the report is compared to the chain. Every rebuilt vector is held
+against the bytes the Go node wrote:
+
+```
+written back: 109 vectors, 39 byte-identical to the chain, 0 differing in a byte
+```
+
+39 is every vector whose transaction the schema states in full — the shared
+spending envelope, the Import and Export kinds, every X signed envelope, and
+each of their truncated and trailing-byte variants. The other 70 come back
+SHORTER, never different: those kinds carry fields past offset 77 that the
+schema does not declare yet. `run.sh` fails if any vector ever differs in a
+byte.
+
+`control.sh` breaks the proof five ways to check it can fail: one language
+stamping the other wire version, one reading two fields at each other's
+offsets, one reading a record list at the wrong width, one shipping a
+different capability byte — and every language told the same wrong record
+width. The fifth cannot break the three-way comparison (three backends told
+the same wrong thing agree perfectly) and only the corpus notices it, which
+is why the chain's own bytes are in the proof.
 
 ### Schema syntax — two equivalent forms, one parser
 

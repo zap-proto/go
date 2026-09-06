@@ -231,3 +231,50 @@ func TestEveryBackendWritesTheSameStride(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryBackendEmbedsANestedStruct — a nested-struct field points at an
+// object, and the reader reads the child's fields at the child's offsets from
+// there. A builder handed a message the caller built already has to copy it,
+// and the pointer it writes has to name where the child's ROOT landed:
+// aimed at the head of the copy it names the copy's 16-byte header, and the
+// first field reads back as 0x0050415A, which is "ZAP".
+//
+// Two backends answered that differently once. They answer it the same way
+// now, and this is where that is said.
+func TestEveryBackendEmbedsANestedStruct(t *testing.T) {
+	f, err := Parse("nest.zap", []byte(`package n
+
+struct Child {
+    N u32 @0
+}
+
+struct Parent {
+    Kid Child @0
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ lang, want string }{
+		{"go", "kidAt := b.Embed(in.Kid)"},
+		{"rust", "let at_kid = b.embed(input.kid);"},
+		{"cpp", "const std::int64_t kid_at = b.embed(in.Kid);"},
+	} {
+		files, err := emit(f, tc.lang, defaultRustRuntime, true)
+		if err != nil {
+			t.Fatalf("emit %s: %v", tc.lang, err)
+		}
+		var all string
+		for _, body := range files {
+			all += string(body)
+		}
+		if !strings.Contains(all, tc.want) {
+			t.Errorf("the %s backend does not embed a nested struct: want %q\n%s", tc.lang, tc.want, all)
+		}
+		// The shape it must NOT have: a fresh object holding the copy, whose
+		// pointer names the copy's header.
+		if strings.Contains(all, "nested.SetBytesFixed(0,") || strings.Contains(all, "nested.set_bytes_fixed(0,") {
+			t.Errorf("the %s backend still points at the head of the copy", tc.lang)
+		}
+	}
+}
