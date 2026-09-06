@@ -19,11 +19,12 @@ func (o Object) BytesFixed(fieldOffset, n int) []byte {
 	if n <= 0 {
 		return nil
 	}
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos < 0 || pos+n > len(o.msg.data) {
+	if pos < 0 || pos+n > len(d) {
 		return nil
 	}
-	return o.msg.data[pos : pos+n]
+	return d[pos : pos+n]
 }
 
 // Length returns the list's wire-encoded element count. Spec-named alias

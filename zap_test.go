@@ -369,3 +369,49 @@ func BenchmarkBuild(b *testing.B) {
 		_ = builder.Finish()
 	}
 }
+
+// TestAbsentObjectReadsZero — the absent object is what Object() and List()
+// answer for a pointer they refuse, so a hostile message routes every
+// downstream accessor onto it. Reading one must answer the zero value, not
+// dereference a message that is not there.
+func TestAbsentObjectReadsZero(t *testing.T) {
+	var o Object
+	if !o.IsNull() {
+		t.Fatal("the zero Object is the absent one")
+	}
+	if o.Bool(0) || o.Uint8(0) != 0 || o.Uint16(0) != 0 || o.Uint32(0) != 0 || o.Uint64(0) != 0 {
+		t.Error("an absent object's scalars are not zero")
+	}
+	if o.Int8(0) != 0 || o.Int16(0) != 0 || o.Int32(0) != 0 || o.Int64(0) != 0 {
+		t.Error("an absent object's signed scalars are not zero")
+	}
+	if o.Float32(0) != 0 || o.Float64(0) != 0 {
+		t.Error("an absent object's floats are not zero")
+	}
+	if o.Text(0) != "" || o.Bytes(0) != nil || o.BytesFixed(0, 4) != nil {
+		t.Error("an absent object's tails are not empty")
+	}
+	if !o.Object(0).IsNull() || o.List(0).Len() != 0 {
+		t.Error("an absent object's pointers do not lead to absent things")
+	}
+}
+
+// TestRefusedPointerReadsZero walks the path a real message takes there: a
+// nested-object pointer the reader refuses, whose fields are then read.
+func TestRefusedPointerReadsZero(t *testing.T) {
+	b := NewBuilder(64)
+	ob := b.StartObject(8)
+	ob.SetUint32(0, 0) // a null nested pointer
+	ob.FinishAsRoot()
+	msg, err := Parse(b.Finish())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested := msg.Root().Object(0)
+	if !nested.IsNull() {
+		t.Fatal("a zero pointer must lead to the absent object")
+	}
+	if nested.Uint32(0) != 0 || nested.Text(4) != "" {
+		t.Error("reading through a refused pointer must answer zero")
+	}
+}

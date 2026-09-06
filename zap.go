@@ -172,6 +172,19 @@ func (o Object) IsNull() bool {
 	return o.offset == 0
 }
 
+// buf is the message's bytes, or none when the object is the absent one.
+//
+// A field read on an absent object is not a programming error: Object() and
+// List() answer the absent object for any pointer they refuse, so a hostile
+// message routes every downstream accessor here. It answers the zero value
+// rather than dereferencing a message that is not there.
+func (o Object) buf() []byte {
+	if o.msg == nil {
+		return nil
+	}
+	return o.msg.data
+}
+
 // Bool reads a bool at the given field offset.
 func (o Object) Bool(fieldOffset int) bool {
 	return o.Uint8(fieldOffset) != 0
@@ -179,38 +192,42 @@ func (o Object) Bool(fieldOffset int) bool {
 
 // Uint8 reads a uint8 at the given field offset.
 func (o Object) Uint8(fieldOffset int) uint8 {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos >= len(o.msg.data) {
+	if pos >= len(d) {
 		return 0
 	}
-	return o.msg.data[pos]
+	return d[pos]
 }
 
 // Uint16 reads a uint16 at the given field offset.
 func (o Object) Uint16(fieldOffset int) uint16 {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+2 > len(o.msg.data) {
+	if pos+2 > len(d) {
 		return 0
 	}
-	return binary.LittleEndian.Uint16(o.msg.data[pos:])
+	return binary.LittleEndian.Uint16(d[pos:])
 }
 
 // Uint32 reads a uint32 at the given field offset.
 func (o Object) Uint32(fieldOffset int) uint32 {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+4 > len(o.msg.data) {
+	if pos+4 > len(d) {
 		return 0
 	}
-	return binary.LittleEndian.Uint32(o.msg.data[pos:])
+	return binary.LittleEndian.Uint32(d[pos:])
 }
 
 // Uint64 reads a uint64 at the given field offset.
 func (o Object) Uint64(fieldOffset int) uint64 {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+8 > len(o.msg.data) {
+	if pos+8 > len(d) {
 		return 0
 	}
-	return binary.LittleEndian.Uint64(o.msg.data[pos:])
+	return binary.LittleEndian.Uint64(d[pos:])
 }
 
 // Int8 reads an int8 at the given field offset.
@@ -263,22 +280,23 @@ func (o Object) Text(fieldOffset int) string {
 // relOffset alias bytes back inside the fixed section or the wire header — a
 // Bytes target can never legitimately live in offsets 0..HeaderSize-1.
 func (o Object) Bytes(fieldOffset int) []byte {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+4 > len(o.msg.data) {
+	if pos+4 > len(d) {
 		return nil
 	}
 
 	// Read offset (relative, unsigned forward pointer) and length.
-	relOffset := binary.LittleEndian.Uint32(o.msg.data[pos:])
+	relOffset := binary.LittleEndian.Uint32(d[pos:])
 	if relOffset == 0 {
 		return nil // Null
 	}
 
 	lenPos := pos + 4
-	if lenPos+4 > len(o.msg.data) {
+	if lenPos+4 > len(d) {
 		return nil
 	}
-	length := binary.LittleEndian.Uint32(o.msg.data[lenPos:])
+	length := binary.LittleEndian.Uint32(d[lenPos:])
 
 	// Calculate absolute position. Reject any payload that lands inside the
 	// wire header — Bytes targets cannot live in offsets 0..HeaderSize-1.
@@ -286,11 +304,11 @@ func (o Object) Bytes(fieldOffset int) []byte {
 	if absPos < HeaderSize {
 		return nil
 	}
-	if absPos+int(length) > len(o.msg.data) {
+	if absPos+int(length) > len(d) {
 		return nil
 	}
 
-	return o.msg.data[absPos : absPos+int(length)]
+	return d[absPos : absPos+int(length)]
 }
 
 // Object reads a nested object at the given field offset.
@@ -307,18 +325,19 @@ func (o Object) Bytes(fieldOffset int) []byte {
 // rejected. The signed cast still lets honest builders point backward to
 // nested objects they finalized first (which live at offset >= HeaderSize).
 func (o Object) Object(fieldOffset int) Object {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+4 > len(o.msg.data) {
+	if pos+4 > len(d) {
 		return Object{}
 	}
 
-	relOffset := int32(binary.LittleEndian.Uint32(o.msg.data[pos:]))
+	relOffset := int32(binary.LittleEndian.Uint32(d[pos:]))
 	if relOffset == 0 {
 		return Object{} // Null
 	}
 
 	absOffset := pos + int(relOffset)
-	if absOffset < HeaderSize || absOffset >= len(o.msg.data) {
+	if absOffset < HeaderSize || absOffset >= len(d) {
 		return Object{}
 	}
 
@@ -333,17 +352,18 @@ func (o Object) Object(fieldOffset int) Object {
 // length=0xFFFFFFFF would otherwise let a downstream `for i := 0; i < Len()`
 // loop iterate 4G times even though every per-element accessor returns 0.
 func (o Object) List(fieldOffset int) List {
+	d := o.buf()
 	pos := o.offset + fieldOffset
-	if pos+8 > len(o.msg.data) {
+	if pos+8 > len(d) {
 		return List{}
 	}
 
-	relOffset := int32(binary.LittleEndian.Uint32(o.msg.data[pos:]))
+	relOffset := int32(binary.LittleEndian.Uint32(d[pos:]))
 	if relOffset == 0 {
 		return List{} // Null
 	}
 
-	length := binary.LittleEndian.Uint32(o.msg.data[pos+4:])
+	length := binary.LittleEndian.Uint32(d[pos+4:])
 
 	// Clamp length to the message size. The tightest bound is
 	// length*minElementSize, but element size is per-list-accessor (Uint8 is
@@ -352,12 +372,12 @@ func (o Object) List(fieldOffset int) List {
 	// baseline — every per-element accessor re-checks its own bounds. This
 	// rejects the 0xFFFFFFFF DoS without false-rejecting honest 1-byte-stride
 	// lists that span the entire message.
-	if int(length) > len(o.msg.data) {
+	if int(length) > len(d) {
 		return List{}
 	}
 
 	absOffset := pos + int(relOffset)
-	if absOffset < HeaderSize || absOffset >= len(o.msg.data) {
+	if absOffset < HeaderSize || absOffset >= len(d) {
 		return List{}
 	}
 
