@@ -69,3 +69,38 @@ struct Block {
     TxBlob     bytes     @57
     ProposalTx bytes     @65
 }
+
+# Two transaction kinds past the envelope, to show the schema can state a
+# whole P transaction and not only the part they share. Both open with the
+# spending envelope's fields at the envelope's offsets — the delta begins at
+# 77, where the envelope ends — and both are 125 bytes wide.
+
+# Kind 4: funds produced on another chain, consumed here.
+struct Import {
+    Kind         u8         @0
+    NetworkID    u32        @1
+    BlockchainID id32       @5
+    Outs         list<Out>  @37
+    OwnerAddrs   list<Addr> @45
+    Ins          list<In>   @53
+    SigIndices   list<Sig>  @61
+    Memo         bytes      @69
+    SourceChain  id32       @77
+    ImportedIns  list<In>   @109
+    ImportedSigs list<Sig>  @117
+}
+
+# Kind 5: funds sent to another chain.
+struct Export {
+    Kind         u8         @0
+    NetworkID    u32        @1
+    BlockchainID id32       @5
+    Outs         list<Out>  @37
+    OwnerAddrs   list<Addr> @45
+    Ins          list<In>   @53
+    SigIndices   list<Sig>  @61
+    Memo         bytes      @69
+    DestChain    id32       @77
+    ExportedOuts list<Out>  @109
+    ExportedAddrs list<Addr> @117
+}

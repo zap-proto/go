@@ -177,6 +177,80 @@ std::vector<View> records(const L& l) {
     return out;
 }
 
+// The two kinds the schema states in full. The numbers are the chain's, read
+// off byte 0 of the transaction.
+constexpr std::uint8_t kKindImport = 4;
+constexpr std::uint8_t kKindExport = 5;
+
+std::expected<Bytes, zap::Error> rebuild_spend(View b);
+std::expected<Bytes, zap::Error> rebuild_import(View b);
+std::expected<Bytes, zap::Error> rebuild_export(View b);
+
+// Write a transaction back out through the builder its KIND names. A P
+// transaction opens with the spending envelope every kind shares and then
+// carries its own fields; the schema states the envelope, and two kinds in
+// full, so the two are written whole and the rest as far as the schema goes.
+std::expected<Bytes, zap::Error> rebuild(View b) {
+    auto t = pchain::WrapSpend(b);
+    if (!t) return std::unexpected(t.error());
+    switch (t->Kind()) {
+        case kKindImport:
+            return rebuild_import(b);
+        case kKindExport:
+            return rebuild_export(b);
+        default:
+            return rebuild_spend(b);
+    }
+}
+
+std::expected<Bytes, zap::Error> rebuild_import(View b) {
+    auto t = pchain::WrapImport(b);
+    if (!t) return std::unexpected(t.error());
+    pchain::ImportInput in;
+    in.Kind = t->Kind();
+    in.NetworkID = t->NetworkID();
+    std::copy_n(t->BlockchainID().begin(), in.BlockchainID.size(), in.BlockchainID.begin());
+    std::copy_n(t->SourceChain().begin(), in.SourceChain.size(), in.SourceChain.begin());
+    const auto outs = records(t->Outs());
+    const auto addrs = records(t->OwnerAddrs());
+    const auto ins = records(t->Ins());
+    const auto sigs = records(t->SigIndices());
+    const auto iins = records(t->ImportedIns());
+    const auto isigs = records(t->ImportedSigs());
+    in.Outs = outs;
+    in.OwnerAddrs = addrs;
+    in.Ins = ins;
+    in.SigIndices = sigs;
+    in.Memo = t->Memo();
+    in.ImportedIns = iins;
+    in.ImportedSigs = isigs;
+    return pchain::NewImport(in);
+}
+
+std::expected<Bytes, zap::Error> rebuild_export(View b) {
+    auto t = pchain::WrapExport(b);
+    if (!t) return std::unexpected(t.error());
+    pchain::ExportInput in;
+    in.Kind = t->Kind();
+    in.NetworkID = t->NetworkID();
+    std::copy_n(t->BlockchainID().begin(), in.BlockchainID.size(), in.BlockchainID.begin());
+    std::copy_n(t->DestChain().begin(), in.DestChain.size(), in.DestChain.begin());
+    const auto outs = records(t->Outs());
+    const auto addrs = records(t->OwnerAddrs());
+    const auto ins = records(t->Ins());
+    const auto sigs = records(t->SigIndices());
+    const auto eouts = records(t->ExportedOuts());
+    const auto eaddrs = records(t->ExportedAddrs());
+    in.Outs = outs;
+    in.OwnerAddrs = addrs;
+    in.Ins = ins;
+    in.SigIndices = sigs;
+    in.Memo = t->Memo();
+    in.ExportedOuts = eouts;
+    in.ExportedAddrs = eaddrs;
+    return pchain::NewExport(in);
+}
+
 std::expected<Bytes, zap::Error> rebuild_spend(View b) {
     auto t = pchain::WrapSpend(b);
     if (!t) return std::unexpected(t.error());
@@ -521,7 +595,7 @@ void vector_line(std::string_view id, std::string_view chain, std::string_view o
 
     if (chain == "P" && op == "tx") {
         line("R", id, spend_of(b));
-        auto out = rebuild_spend(b);
+        auto out = rebuild(b);
         if (!out) {
             line("W", id, std::format("err={}", zap::describe(out.error())));
             return;

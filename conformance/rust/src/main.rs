@@ -275,7 +275,7 @@ fn vector(w: &Sink, id: &str, chain: &str, op: &str, b: &[u8]) {
     match (chain, op) {
         ("P", "tx") => {
             line_err(w, "R", id, digest::spend_of(b));
-            let out = match digest::rebuild_spend(b) {
+            let out = match digest::rebuild(b) {
                 Ok(o) => o,
                 Err(e) => {
                     line(w, "W", id, &format!("err={e}"));

@@ -774,3 +774,427 @@ pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
     b.finish()
 }
 
+// Import — field offsets, in bytes, and the fixed section's size.
+pub const IMPORT_KIND: usize = 0;
+pub const IMPORT_NETWORK_ID: usize = 1;
+pub const IMPORT_BLOCKCHAIN_ID: usize = 5;
+pub const IMPORT_OUTS: usize = 37;
+pub const IMPORT_OWNER_ADDRS: usize = 45;
+pub const IMPORT_INS: usize = 53;
+pub const IMPORT_SIG_INDICES: usize = 61;
+pub const IMPORT_MEMO: usize = 69;
+pub const IMPORT_SOURCE_CHAIN: usize = 77;
+pub const IMPORT_IMPORTED_INS: usize = 109;
+pub const IMPORT_IMPORTED_SIGS: usize = 117;
+pub const IMPORT_SIZE: usize = 125;
+
+/// A view of a ZAP-encoded Import. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct Import<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> Import<'a> {
+    /// Take `data` as a Import message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(Import {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        Import { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    pub fn kind(&self) -> u8 {
+        self.o.u8(IMPORT_KIND)
+    }
+
+    pub fn network_id(&self) -> u32 {
+        self.o.u32(IMPORT_NETWORK_ID)
+    }
+
+    /// The 32 inline bytes at `IMPORT_BLOCKCHAIN_ID`; zeros if the span runs off the buffer.
+    pub fn blockchain_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(IMPORT_BLOCKCHAIN_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn outs(&self) -> OutList<'a> {
+        OutList { l: self.o.list_stride(IMPORT_OUTS, OUT_SIZE) }
+    }
+
+    pub fn owner_addrs(&self) -> AddrList<'a> {
+        AddrList { l: self.o.list_stride(IMPORT_OWNER_ADDRS, ADDR_SIZE) }
+    }
+
+    pub fn ins(&self) -> InList<'a> {
+        InList { l: self.o.list_stride(IMPORT_INS, IN_SIZE) }
+    }
+
+    pub fn sig_indices(&self) -> SigList<'a> {
+        SigList { l: self.o.list_stride(IMPORT_SIG_INDICES, SIG_SIZE) }
+    }
+
+    pub fn memo(&self) -> &'a [u8] {
+        self.o.bytes(IMPORT_MEMO)
+    }
+
+    /// The 32 inline bytes at `IMPORT_SOURCE_CHAIN`; zeros if the span runs off the buffer.
+    pub fn source_chain(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(IMPORT_SOURCE_CHAIN, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn imported_ins(&self) -> InList<'a> {
+        InList { l: self.o.list_stride(IMPORT_IMPORTED_INS, IN_SIZE) }
+    }
+
+    pub fn imported_sigs(&self) -> SigList<'a> {
+        SigList { l: self.o.list_stride(IMPORT_IMPORTED_SIGS, SIG_SIZE) }
+    }
+}
+
+/// The field values [`new_import`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportInput<'a> {
+    pub kind: u8,
+    pub network_id: u32,
+    pub blockchain_id: &'a [u8; 32],
+    pub outs: &'a [&'a [u8]],
+    pub owner_addrs: &'a [&'a [u8]],
+    pub ins: &'a [&'a [u8]],
+    pub sig_indices: &'a [&'a [u8]],
+    pub memo: &'a [u8],
+    pub source_chain: &'a [u8; 32],
+    pub imported_ins: &'a [&'a [u8]],
+    pub imported_sigs: &'a [&'a [u8]],
+}
+
+impl<'a> Default for ImportInput<'a> {
+    fn default() -> Self {
+        ImportInput {
+            kind: 0,
+            network_id: 0,
+            blockchain_id: &[0u8; 32],
+            outs: &[],
+            owner_addrs: &[],
+            ins: &[],
+            sig_indices: &[],
+            memo: &[],
+            source_chain: &[0u8; 32],
+            imported_ins: &[],
+            imported_sigs: &[],
+        }
+    }
+}
+
+/// Write a Import message and answer its bytes.
+pub fn new_import(input: &ImportInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_outs = 0;
+    if !input.outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.outs {
+            let mut rec = [0u8; OUT_SIZE];
+            let n = elem.len().min(OUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_outs = lb.finish_offset();
+    }
+    let mut at_owner_addrs = 0;
+    if !input.owner_addrs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.owner_addrs {
+            let mut rec = [0u8; ADDR_SIZE];
+            let n = elem.len().min(ADDR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_owner_addrs = lb.finish_offset();
+    }
+    let mut at_ins = 0;
+    if !input.ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.ins {
+            let mut rec = [0u8; IN_SIZE];
+            let n = elem.len().min(IN_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_ins = lb.finish_offset();
+    }
+    let mut at_sig_indices = 0;
+    if !input.sig_indices.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.sig_indices {
+            let mut rec = [0u8; SIG_SIZE];
+            let n = elem.len().min(SIG_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_sig_indices = lb.finish_offset();
+    }
+    let mut at_imported_ins = 0;
+    if !input.imported_ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.imported_ins {
+            let mut rec = [0u8; IN_SIZE];
+            let n = elem.len().min(IN_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_imported_ins = lb.finish_offset();
+    }
+    let mut at_imported_sigs = 0;
+    if !input.imported_sigs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.imported_sigs {
+            let mut rec = [0u8; SIG_SIZE];
+            let n = elem.len().min(SIG_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_imported_sigs = lb.finish_offset();
+    }
+    let mut ob = b.start_object(IMPORT_SIZE);
+    ob.set_u8(&mut b, IMPORT_KIND, input.kind);
+    ob.set_u32(&mut b, IMPORT_NETWORK_ID, input.network_id);
+    ob.set_bytes_fixed(&mut b, IMPORT_BLOCKCHAIN_ID, input.blockchain_id);
+    ob.set_list(&mut b, IMPORT_OUTS, at_outs, input.outs.len());
+    ob.set_list(&mut b, IMPORT_OWNER_ADDRS, at_owner_addrs, input.owner_addrs.len());
+    ob.set_list(&mut b, IMPORT_INS, at_ins, input.ins.len());
+    ob.set_list(&mut b, IMPORT_SIG_INDICES, at_sig_indices, input.sig_indices.len());
+    ob.set_bytes(&mut b, IMPORT_MEMO, input.memo);
+    ob.set_bytes_fixed(&mut b, IMPORT_SOURCE_CHAIN, input.source_chain);
+    ob.set_list(&mut b, IMPORT_IMPORTED_INS, at_imported_ins, input.imported_ins.len());
+    ob.set_list(&mut b, IMPORT_IMPORTED_SIGS, at_imported_sigs, input.imported_sigs.len());
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+
+// Export — field offsets, in bytes, and the fixed section's size.
+pub const EXPORT_KIND: usize = 0;
+pub const EXPORT_NETWORK_ID: usize = 1;
+pub const EXPORT_BLOCKCHAIN_ID: usize = 5;
+pub const EXPORT_OUTS: usize = 37;
+pub const EXPORT_OWNER_ADDRS: usize = 45;
+pub const EXPORT_INS: usize = 53;
+pub const EXPORT_SIG_INDICES: usize = 61;
+pub const EXPORT_MEMO: usize = 69;
+pub const EXPORT_DEST_CHAIN: usize = 77;
+pub const EXPORT_EXPORTED_OUTS: usize = 109;
+pub const EXPORT_EXPORTED_ADDRS: usize = 117;
+pub const EXPORT_SIZE: usize = 125;
+
+/// A view of a ZAP-encoded Export. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct Export<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> Export<'a> {
+    /// Take `data` as a Export message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(Export {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        Export { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    pub fn kind(&self) -> u8 {
+        self.o.u8(EXPORT_KIND)
+    }
+
+    pub fn network_id(&self) -> u32 {
+        self.o.u32(EXPORT_NETWORK_ID)
+    }
+
+    /// The 32 inline bytes at `EXPORT_BLOCKCHAIN_ID`; zeros if the span runs off the buffer.
+    pub fn blockchain_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(EXPORT_BLOCKCHAIN_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn outs(&self) -> OutList<'a> {
+        OutList { l: self.o.list_stride(EXPORT_OUTS, OUT_SIZE) }
+    }
+
+    pub fn owner_addrs(&self) -> AddrList<'a> {
+        AddrList { l: self.o.list_stride(EXPORT_OWNER_ADDRS, ADDR_SIZE) }
+    }
+
+    pub fn ins(&self) -> InList<'a> {
+        InList { l: self.o.list_stride(EXPORT_INS, IN_SIZE) }
+    }
+
+    pub fn sig_indices(&self) -> SigList<'a> {
+        SigList { l: self.o.list_stride(EXPORT_SIG_INDICES, SIG_SIZE) }
+    }
+
+    pub fn memo(&self) -> &'a [u8] {
+        self.o.bytes(EXPORT_MEMO)
+    }
+
+    /// The 32 inline bytes at `EXPORT_DEST_CHAIN`; zeros if the span runs off the buffer.
+    pub fn dest_chain(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(EXPORT_DEST_CHAIN, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn exported_outs(&self) -> OutList<'a> {
+        OutList { l: self.o.list_stride(EXPORT_EXPORTED_OUTS, OUT_SIZE) }
+    }
+
+    pub fn exported_addrs(&self) -> AddrList<'a> {
+        AddrList { l: self.o.list_stride(EXPORT_EXPORTED_ADDRS, ADDR_SIZE) }
+    }
+}
+
+/// The field values [`new_export`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct ExportInput<'a> {
+    pub kind: u8,
+    pub network_id: u32,
+    pub blockchain_id: &'a [u8; 32],
+    pub outs: &'a [&'a [u8]],
+    pub owner_addrs: &'a [&'a [u8]],
+    pub ins: &'a [&'a [u8]],
+    pub sig_indices: &'a [&'a [u8]],
+    pub memo: &'a [u8],
+    pub dest_chain: &'a [u8; 32],
+    pub exported_outs: &'a [&'a [u8]],
+    pub exported_addrs: &'a [&'a [u8]],
+}
+
+impl<'a> Default for ExportInput<'a> {
+    fn default() -> Self {
+        ExportInput {
+            kind: 0,
+            network_id: 0,
+            blockchain_id: &[0u8; 32],
+            outs: &[],
+            owner_addrs: &[],
+            ins: &[],
+            sig_indices: &[],
+            memo: &[],
+            dest_chain: &[0u8; 32],
+            exported_outs: &[],
+            exported_addrs: &[],
+        }
+    }
+}
+
+/// Write a Export message and answer its bytes.
+pub fn new_export(input: &ExportInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_outs = 0;
+    if !input.outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.outs {
+            let mut rec = [0u8; OUT_SIZE];
+            let n = elem.len().min(OUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_outs = lb.finish_offset();
+    }
+    let mut at_owner_addrs = 0;
+    if !input.owner_addrs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.owner_addrs {
+            let mut rec = [0u8; ADDR_SIZE];
+            let n = elem.len().min(ADDR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_owner_addrs = lb.finish_offset();
+    }
+    let mut at_ins = 0;
+    if !input.ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.ins {
+            let mut rec = [0u8; IN_SIZE];
+            let n = elem.len().min(IN_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_ins = lb.finish_offset();
+    }
+    let mut at_sig_indices = 0;
+    if !input.sig_indices.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.sig_indices {
+            let mut rec = [0u8; SIG_SIZE];
+            let n = elem.len().min(SIG_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_sig_indices = lb.finish_offset();
+    }
+    let mut at_exported_outs = 0;
+    if !input.exported_outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.exported_outs {
+            let mut rec = [0u8; OUT_SIZE];
+            let n = elem.len().min(OUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_exported_outs = lb.finish_offset();
+    }
+    let mut at_exported_addrs = 0;
+    if !input.exported_addrs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.exported_addrs {
+            let mut rec = [0u8; ADDR_SIZE];
+            let n = elem.len().min(ADDR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_exported_addrs = lb.finish_offset();
+    }
+    let mut ob = b.start_object(EXPORT_SIZE);
+    ob.set_u8(&mut b, EXPORT_KIND, input.kind);
+    ob.set_u32(&mut b, EXPORT_NETWORK_ID, input.network_id);
+    ob.set_bytes_fixed(&mut b, EXPORT_BLOCKCHAIN_ID, input.blockchain_id);
+    ob.set_list(&mut b, EXPORT_OUTS, at_outs, input.outs.len());
+    ob.set_list(&mut b, EXPORT_OWNER_ADDRS, at_owner_addrs, input.owner_addrs.len());
+    ob.set_list(&mut b, EXPORT_INS, at_ins, input.ins.len());
+    ob.set_list(&mut b, EXPORT_SIG_INDICES, at_sig_indices, input.sig_indices.len());
+    ob.set_bytes(&mut b, EXPORT_MEMO, input.memo);
+    ob.set_bytes_fixed(&mut b, EXPORT_DEST_CHAIN, input.dest_chain);
+    ob.set_list(&mut b, EXPORT_EXPORTED_OUTS, at_exported_outs, input.exported_outs.len());
+    ob.set_list(&mut b, EXPORT_EXPORTED_ADDRS, at_exported_addrs, input.exported_addrs.len());
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+

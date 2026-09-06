@@ -450,3 +450,297 @@ func NewBlock(in BlockInput) []byte {
 	ob.FinishAsRoot()
 	return b.Finish()
 }
+
+const (
+	importKindOff         = 0
+	importNetworkIDOff    = 1
+	importBlockchainIDOff = 5
+	importOutsOff         = 37
+	importOwnerAddrsOff   = 45
+	importInsOff          = 53
+	importSigIndicesOff   = 61
+	importMemoOff         = 69
+	importSourceChainOff  = 77
+	importImportedInsOff  = 109
+	importImportedSigsOff = 117
+	importSize            = 125
+)
+
+// Import is a zero-copy view into a ZAP-encoded Import message.
+type Import struct{ o zap.Object }
+
+// WrapImport parses b and returns a typed view. Returns an error if the
+// wire-level checks (magic, version, size) fail.
+func WrapImport(b []byte) (Import, error) {
+	m, err := zap.Parse(b)
+	if err != nil {
+		return Import{}, err
+	}
+	return Import{o: m.Root()}, nil
+}
+
+func (t Import) Kind() uint8       { return t.o.Uint8(importKindOff) }
+func (t Import) NetworkID() uint32 { return t.o.Uint32(importNetworkIDOff) }
+func (t Import) BlockchainID() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(importBlockchainIDOff, 32))
+	return out
+}
+func (t Import) Outs() OutList { return OutList{l: t.o.ListStride(importOutsOff, outSize)} }
+func (t Import) OwnerAddrs() AddrList {
+	return AddrList{l: t.o.ListStride(importOwnerAddrsOff, addrSize)}
+}
+func (t Import) Ins() InList         { return InList{l: t.o.ListStride(importInsOff, inSize)} }
+func (t Import) SigIndices() SigList { return SigList{l: t.o.ListStride(importSigIndicesOff, sigSize)} }
+func (t Import) Memo() []byte        { return t.o.Bytes(importMemoOff) }
+func (t Import) SourceChain() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(importSourceChainOff, 32))
+	return out
+}
+func (t Import) ImportedIns() InList { return InList{l: t.o.ListStride(importImportedInsOff, inSize)} }
+func (t Import) ImportedSigs() SigList {
+	return SigList{l: t.o.ListStride(importImportedSigsOff, sigSize)}
+}
+
+// ImportInput collects the field values for NewImport.
+type ImportInput struct {
+	Kind         uint8
+	NetworkID    uint32
+	BlockchainID [32]byte
+	Outs         [][]byte
+	OwnerAddrs   [][]byte
+	Ins          [][]byte
+	SigIndices   [][]byte
+	Memo         []byte
+	SourceChain  [32]byte
+	ImportedIns  [][]byte
+	ImportedSigs [][]byte
+}
+
+// NewImport builds a ZAP-encoded Import message from in and returns the bytes.
+func NewImport(in ImportInput) []byte {
+	b := zap.NewBuilderV2(256)
+	outsAt := 0
+	if len(in.Outs) > 0 {
+		lb := b.StartList(outSize)
+		for _, elem := range in.Outs {
+			var rec [outSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		outsAt = lb.FinishOffset()
+	}
+	ownerAddrsAt := 0
+	if len(in.OwnerAddrs) > 0 {
+		lb := b.StartList(addrSize)
+		for _, elem := range in.OwnerAddrs {
+			var rec [addrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		ownerAddrsAt = lb.FinishOffset()
+	}
+	insAt := 0
+	if len(in.Ins) > 0 {
+		lb := b.StartList(inSize)
+		for _, elem := range in.Ins {
+			var rec [inSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		insAt = lb.FinishOffset()
+	}
+	sigIndicesAt := 0
+	if len(in.SigIndices) > 0 {
+		lb := b.StartList(sigSize)
+		for _, elem := range in.SigIndices {
+			var rec [sigSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		sigIndicesAt = lb.FinishOffset()
+	}
+	importedInsAt := 0
+	if len(in.ImportedIns) > 0 {
+		lb := b.StartList(inSize)
+		for _, elem := range in.ImportedIns {
+			var rec [inSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		importedInsAt = lb.FinishOffset()
+	}
+	importedSigsAt := 0
+	if len(in.ImportedSigs) > 0 {
+		lb := b.StartList(sigSize)
+		for _, elem := range in.ImportedSigs {
+			var rec [sigSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		importedSigsAt = lb.FinishOffset()
+	}
+	ob := b.StartObject(importSize)
+	ob.SetUint8(importKindOff, in.Kind)
+	ob.SetUint32(importNetworkIDOff, in.NetworkID)
+	ob.SetBytesFixed(importBlockchainIDOff, in.BlockchainID[:])
+	ob.SetList(importOutsOff, outsAt, len(in.Outs))
+	ob.SetList(importOwnerAddrsOff, ownerAddrsAt, len(in.OwnerAddrs))
+	ob.SetList(importInsOff, insAt, len(in.Ins))
+	ob.SetList(importSigIndicesOff, sigIndicesAt, len(in.SigIndices))
+	ob.SetBytes(importMemoOff, in.Memo)
+	ob.SetBytesFixed(importSourceChainOff, in.SourceChain[:])
+	ob.SetList(importImportedInsOff, importedInsAt, len(in.ImportedIns))
+	ob.SetList(importImportedSigsOff, importedSigsAt, len(in.ImportedSigs))
+	ob.FinishAsRoot()
+	return b.Finish()
+}
+
+const (
+	exportKindOff          = 0
+	exportNetworkIDOff     = 1
+	exportBlockchainIDOff  = 5
+	exportOutsOff          = 37
+	exportOwnerAddrsOff    = 45
+	exportInsOff           = 53
+	exportSigIndicesOff    = 61
+	exportMemoOff          = 69
+	exportDestChainOff     = 77
+	exportExportedOutsOff  = 109
+	exportExportedAddrsOff = 117
+	exportSize             = 125
+)
+
+// Export is a zero-copy view into a ZAP-encoded Export message.
+type Export struct{ o zap.Object }
+
+// WrapExport parses b and returns a typed view. Returns an error if the
+// wire-level checks (magic, version, size) fail.
+func WrapExport(b []byte) (Export, error) {
+	m, err := zap.Parse(b)
+	if err != nil {
+		return Export{}, err
+	}
+	return Export{o: m.Root()}, nil
+}
+
+func (t Export) Kind() uint8       { return t.o.Uint8(exportKindOff) }
+func (t Export) NetworkID() uint32 { return t.o.Uint32(exportNetworkIDOff) }
+func (t Export) BlockchainID() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(exportBlockchainIDOff, 32))
+	return out
+}
+func (t Export) Outs() OutList { return OutList{l: t.o.ListStride(exportOutsOff, outSize)} }
+func (t Export) OwnerAddrs() AddrList {
+	return AddrList{l: t.o.ListStride(exportOwnerAddrsOff, addrSize)}
+}
+func (t Export) Ins() InList         { return InList{l: t.o.ListStride(exportInsOff, inSize)} }
+func (t Export) SigIndices() SigList { return SigList{l: t.o.ListStride(exportSigIndicesOff, sigSize)} }
+func (t Export) Memo() []byte        { return t.o.Bytes(exportMemoOff) }
+func (t Export) DestChain() [32]byte {
+	var out [32]byte
+	copy(out[:], t.o.BytesFixed(exportDestChainOff, 32))
+	return out
+}
+func (t Export) ExportedOuts() OutList {
+	return OutList{l: t.o.ListStride(exportExportedOutsOff, outSize)}
+}
+func (t Export) ExportedAddrs() AddrList {
+	return AddrList{l: t.o.ListStride(exportExportedAddrsOff, addrSize)}
+}
+
+// ExportInput collects the field values for NewExport.
+type ExportInput struct {
+	Kind          uint8
+	NetworkID     uint32
+	BlockchainID  [32]byte
+	Outs          [][]byte
+	OwnerAddrs    [][]byte
+	Ins           [][]byte
+	SigIndices    [][]byte
+	Memo          []byte
+	DestChain     [32]byte
+	ExportedOuts  [][]byte
+	ExportedAddrs [][]byte
+}
+
+// NewExport builds a ZAP-encoded Export message from in and returns the bytes.
+func NewExport(in ExportInput) []byte {
+	b := zap.NewBuilderV2(256)
+	outsAt := 0
+	if len(in.Outs) > 0 {
+		lb := b.StartList(outSize)
+		for _, elem := range in.Outs {
+			var rec [outSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		outsAt = lb.FinishOffset()
+	}
+	ownerAddrsAt := 0
+	if len(in.OwnerAddrs) > 0 {
+		lb := b.StartList(addrSize)
+		for _, elem := range in.OwnerAddrs {
+			var rec [addrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		ownerAddrsAt = lb.FinishOffset()
+	}
+	insAt := 0
+	if len(in.Ins) > 0 {
+		lb := b.StartList(inSize)
+		for _, elem := range in.Ins {
+			var rec [inSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		insAt = lb.FinishOffset()
+	}
+	sigIndicesAt := 0
+	if len(in.SigIndices) > 0 {
+		lb := b.StartList(sigSize)
+		for _, elem := range in.SigIndices {
+			var rec [sigSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		sigIndicesAt = lb.FinishOffset()
+	}
+	exportedOutsAt := 0
+	if len(in.ExportedOuts) > 0 {
+		lb := b.StartList(outSize)
+		for _, elem := range in.ExportedOuts {
+			var rec [outSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		exportedOutsAt = lb.FinishOffset()
+	}
+	exportedAddrsAt := 0
+	if len(in.ExportedAddrs) > 0 {
+		lb := b.StartList(addrSize)
+		for _, elem := range in.ExportedAddrs {
+			var rec [addrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		exportedAddrsAt = lb.FinishOffset()
+	}
+	ob := b.StartObject(exportSize)
+	ob.SetUint8(exportKindOff, in.Kind)
+	ob.SetUint32(exportNetworkIDOff, in.NetworkID)
+	ob.SetBytesFixed(exportBlockchainIDOff, in.BlockchainID[:])
+	ob.SetList(exportOutsOff, outsAt, len(in.Outs))
+	ob.SetList(exportOwnerAddrsOff, ownerAddrsAt, len(in.OwnerAddrs))
+	ob.SetList(exportInsOff, insAt, len(in.Ins))
+	ob.SetList(exportSigIndicesOff, sigIndicesAt, len(in.SigIndices))
+	ob.SetBytes(exportMemoOff, in.Memo)
+	ob.SetBytesFixed(exportDestChainOff, in.DestChain[:])
+	ob.SetList(exportExportedOutsOff, exportedOutsAt, len(in.ExportedOuts))
+	ob.SetList(exportExportedAddrsOff, exportedAddrsAt, len(in.ExportedAddrs))
+	ob.FinishAsRoot()
+	return b.Finish()
+}

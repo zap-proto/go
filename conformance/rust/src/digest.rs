@@ -186,6 +186,69 @@ pub fn block_of(b: &[u8]) -> Result<String, zap::Error> {
 
 /// Write the transaction back out through the generated builder, carrying
 /// every field the builder can carry.
+/// The two kinds the schema states in full. The numbers are the chain's, read
+/// off byte 0 of the transaction.
+const KIND_IMPORT: u8 = 4;
+const KIND_EXPORT: u8 = 5;
+
+/// Write a transaction back out through the builder its KIND names. A P
+/// transaction opens with the spending envelope every kind shares and then
+/// carries its own fields; the schema states the envelope, and two kinds in
+/// full, so the two are written whole and the rest as far as the schema goes.
+pub fn rebuild(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
+    match p::Spend::wrap(b)?.kind() {
+        KIND_IMPORT => rebuild_import(b),
+        KIND_EXPORT => rebuild_export(b),
+        _ => rebuild_spend(b),
+    }
+}
+
+fn rebuild_import(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
+    let t = p::Import::wrap(b)?;
+    let outs = out_records(&t.outs());
+    let addrs = addr_records(&t.owner_addrs());
+    let ins = in_records(&t.ins());
+    let sigs = sig_records(&t.sig_indices());
+    let iins = in_records(&t.imported_ins());
+    let isigs = sig_records(&t.imported_sigs());
+    Ok(p::new_import(&p::ImportInput {
+        kind: t.kind(),
+        network_id: t.network_id(),
+        blockchain_id: t.blockchain_id(),
+        outs: &outs,
+        owner_addrs: &addrs,
+        ins: &ins,
+        sig_indices: &sigs,
+        memo: t.memo(),
+        source_chain: t.source_chain(),
+        imported_ins: &iins,
+        imported_sigs: &isigs,
+    }))
+}
+
+fn rebuild_export(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
+    let t = p::Export::wrap(b)?;
+    let outs = out_records(&t.outs());
+    let addrs = addr_records(&t.owner_addrs());
+    let ins = in_records(&t.ins());
+    let sigs = sig_records(&t.sig_indices());
+    let eouts = out_records(&t.exported_outs());
+    let eaddrs = addr_records(&t.exported_addrs());
+    Ok(p::new_export(&p::ExportInput {
+        kind: t.kind(),
+        network_id: t.network_id(),
+        blockchain_id: t.blockchain_id(),
+        outs: &outs,
+        owner_addrs: &addrs,
+        ins: &ins,
+        sig_indices: &sigs,
+        memo: t.memo(),
+        dest_chain: t.dest_chain(),
+        exported_outs: &eouts,
+        exported_addrs: &eaddrs,
+    }))
+}
+
 pub fn rebuild_spend(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
     let t = p::Spend::wrap(b)?;
     let outs = out_records(&t.outs());

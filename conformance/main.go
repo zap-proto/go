@@ -269,7 +269,7 @@ func vector(w *bufio.Writer, id, chain, op string, b []byte) {
 	case chain == "P" && op == "tx":
 		d, err := pchain.SpendOf(b)
 		lineErr(w, "R", id, d, err)
-		out, err := pchain.RebuildSpend(b)
+		out, err := pchain.Rebuild(b)
 		if err != nil {
 			line(w, "W", id, "err="+err.Error())
 			return

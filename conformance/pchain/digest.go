@@ -83,7 +83,73 @@ func BlockOf(b []byte) (string, error) {
 	return w.String(), nil
 }
 
-// RebuildSpend writes the transaction back out through the generated
+// Rebuild writes a transaction back out through the builder its KIND names.
+// A P transaction opens with the spending envelope every kind shares and then
+// carries its own fields; the schema states the envelope, and two kinds in
+// full, so the two are written whole and the rest are written as far as the
+// schema goes.
+func Rebuild(b []byte) ([]byte, error) {
+	t, err := WrapSpend(b)
+	if err != nil {
+		return nil, err
+	}
+	switch t.Kind() {
+	case kindImport:
+		return rebuildImport(b)
+	case kindExport:
+		return rebuildExport(b)
+	}
+	return RebuildSpend(b)
+}
+
+// The two kinds the schema states in full. The numbers are the chain's, read
+// off byte 0 of the transaction.
+const (
+	kindImport = 4
+	kindExport = 5
+)
+
+func rebuildImport(b []byte) ([]byte, error) {
+	t, err := WrapImport(b)
+	if err != nil {
+		return nil, err
+	}
+	return NewImport(ImportInput{
+		Kind:         t.Kind(),
+		NetworkID:    t.NetworkID(),
+		BlockchainID: t.BlockchainID(),
+		Outs:         outRecords(t.Outs()),
+		OwnerAddrs:   addrRecords(t.OwnerAddrs()),
+		Ins:          inRecords(t.Ins()),
+		SigIndices:   sigRecords(t.SigIndices()),
+		Memo:         t.Memo(),
+		SourceChain:  t.SourceChain(),
+		ImportedIns:  inRecords(t.ImportedIns()),
+		ImportedSigs: sigRecords(t.ImportedSigs()),
+	}), nil
+}
+
+func rebuildExport(b []byte) ([]byte, error) {
+	t, err := WrapExport(b)
+	if err != nil {
+		return nil, err
+	}
+	return NewExport(ExportInput{
+		Kind:          t.Kind(),
+		NetworkID:     t.NetworkID(),
+		BlockchainID:  t.BlockchainID(),
+		Outs:          outRecords(t.Outs()),
+		OwnerAddrs:    addrRecords(t.OwnerAddrs()),
+		Ins:           inRecords(t.Ins()),
+		SigIndices:    sigRecords(t.SigIndices()),
+		Memo:          t.Memo(),
+		DestChain:     t.DestChain(),
+		ExportedOuts:  outRecords(t.ExportedOuts()),
+		ExportedAddrs: addrRecords(t.ExportedAddrs()),
+	}), nil
+}
+
+// RebuildSpend writes the shared envelope back out through the generated
 // builder, carrying every field the builder can carry. The list elements go
 // back as the raw record bytes they were read from.
 //
