@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"github.com/zap-proto/go/idl"
 	"go/format"
 	"strings"
 )
@@ -14,7 +15,7 @@ import (
 // map of basename → gofmt-clean bytes, ready to write. The basename is the
 // lowercase snake-cased struct/interface name plus "_zap.go" (matches the
 // spec convention).
-func Emit(f *File) (map[string][]byte, error) {
+func Emit(f *idl.File) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(f.Structs)+len(f.Interfaces))
 	for _, s := range f.Structs {
 		buf, err := emitStruct(f, s)
@@ -45,7 +46,7 @@ func Emit(f *File) (map[string][]byte, error) {
 // interfaces from f. Returns the basename (derived from the schema source
 // filename) and the gofmt-clean bytes. Used by callers that prefer one
 // file per schema over one file per struct.
-func EmitSingle(f *File) (string, []byte, error) {
+func EmitSingle(f *idl.File) (string, []byte, error) {
 	if len(f.Structs) == 0 && len(f.Interfaces) == 0 {
 		return "", nil, fmt.Errorf("no structs or interfaces to emit")
 	}
@@ -113,7 +114,7 @@ func writeFileHeader(w *bytes.Buffer, pkg, source string, needsZap, needsRPC boo
 // the alignment boundary if needed. We do NOT round here — the spec is
 // explicit-offset, author-controlled; the reported size equals
 // max(end-of-field).
-func structSize(s *Struct) int {
+func structSize(s *idl.Struct) int {
 	size := 0
 	for _, f := range s.Fields {
 		end := f.Offset + f.Type.SlotSize()
@@ -124,7 +125,7 @@ func structSize(s *Struct) int {
 	return size
 }
 
-func emitStruct(f *File, s *Struct) ([]byte, error) {
+func emitStruct(f *idl.File, s *idl.Struct) ([]byte, error) {
 	if err := validate(s); err != nil {
 		return nil, err
 	}
@@ -138,7 +139,7 @@ func emitStruct(f *File, s *Struct) ([]byte, error) {
 
 // emitInterfaceFile emits one standalone .go file for a single interface
 // (the per-interface output of Emit). It imports rpc for the call envelope.
-func emitInterfaceFile(f *File, iface *Interface) ([]byte, error) {
+func emitInterfaceFile(f *idl.File, iface *idl.Interface) ([]byte, error) {
 	if err := validateInterface(f, iface); err != nil {
 		return nil, err
 	}
@@ -150,7 +151,7 @@ func emitInterfaceFile(f *File, iface *Interface) ([]byte, error) {
 
 // sourceName returns the recorded source basename, or a fallback derived
 // from the package for callers that build a File directly without Parse.
-func sourceName(f *File) string {
+func sourceName(f *idl.File) string {
 	if f.Source != "" {
 		return f.Source
 	}
@@ -160,7 +161,7 @@ func sourceName(f *File) string {
 // validateInterface checks that every method param references a struct
 // declared in the same file (method payloads are ZAP structs) and that
 // method names are unique within the interface. Fail fast and loud.
-func validateInterface(f *File, iface *Interface) error {
+func validateInterface(f *idl.File, iface *idl.Interface) error {
 	if len(iface.Methods) == 0 {
 		return fmt.Errorf("interface %s: no methods", iface.Name)
 	}
@@ -174,7 +175,7 @@ func validateInterface(f *File, iface *Interface) error {
 			return fmt.Errorf("interface %s: duplicate method %s", iface.Name, m.Name)
 		}
 		seen[m.Name] = true
-		for _, p := range []*Param{m.Request, m.Response} {
+		for _, p := range []*idl.Param{m.Request, m.Response} {
 			if p == nil {
 				continue
 			}
@@ -190,7 +191,7 @@ func validateInterface(f *File, iface *Interface) error {
 // validate checks for offset overlap and bad field types. Fail fast and
 // loud — the schema author is responsible for the layout, but a typo
 // shouldn't silently emit broken code.
-func validate(s *Struct) error {
+func validate(s *idl.Struct) error {
 	size := structSize(s)
 	if size == 0 {
 		return fmt.Errorf("struct %s: no fields", s.Name)
@@ -216,7 +217,7 @@ func validate(s *Struct) error {
 	return nil
 }
 
-func emitOffsets(w *bytes.Buffer, s *Struct) {
+func emitOffsets(w *bytes.Buffer, s *idl.Struct) {
 	w.WriteString("const (\n")
 	lower := lowerFirst(s.Name)
 	for _, f := range s.Fields {
@@ -226,7 +227,7 @@ func emitOffsets(w *bytes.Buffer, s *Struct) {
 	w.WriteString(")\n\n")
 }
 
-func emitReader(w *bytes.Buffer, s *Struct) {
+func emitReader(w *bytes.Buffer, s *idl.Struct) {
 	fmt.Fprintf(w, "// %s is a zero-copy view into a ZAP-encoded %s message.\n", s.Name, s.Name)
 	fmt.Fprintf(w, "type %s struct{ o zap.Object }\n\n", s.Name)
 
@@ -246,50 +247,50 @@ func emitReader(w *bytes.Buffer, s *Struct) {
 	}
 }
 
-func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
+func emitFieldReader(w *bytes.Buffer, structName, lower string, f *idl.Field) {
 	offsetConst := fmt.Sprintf("%s%sOff", lower, f.Name)
 	switch f.Type.Kind {
-	case KindBool:
+	case idl.KindBool:
 		fmt.Fprintf(w, "func (t %s) %s() bool { return t.o.Bool(%s) }\n", structName, f.Name, offsetConst)
-	case KindU8:
+	case idl.KindU8:
 		fmt.Fprintf(w, "func (t %s) %s() uint8 { return t.o.Uint8(%s) }\n", structName, f.Name, offsetConst)
-	case KindU16:
+	case idl.KindU16:
 		fmt.Fprintf(w, "func (t %s) %s() uint16 { return t.o.Uint16(%s) }\n", structName, f.Name, offsetConst)
-	case KindU32:
+	case idl.KindU32:
 		fmt.Fprintf(w, "func (t %s) %s() uint32 { return t.o.Uint32(%s) }\n", structName, f.Name, offsetConst)
-	case KindU64:
+	case idl.KindU64:
 		fmt.Fprintf(w, "func (t %s) %s() uint64 { return t.o.Uint64(%s) }\n", structName, f.Name, offsetConst)
-	case KindI8:
+	case idl.KindI8:
 		fmt.Fprintf(w, "func (t %s) %s() int8 { return t.o.Int8(%s) }\n", structName, f.Name, offsetConst)
-	case KindI16:
+	case idl.KindI16:
 		fmt.Fprintf(w, "func (t %s) %s() int16 { return t.o.Int16(%s) }\n", structName, f.Name, offsetConst)
-	case KindI32:
+	case idl.KindI32:
 		fmt.Fprintf(w, "func (t %s) %s() int32 { return t.o.Int32(%s) }\n", structName, f.Name, offsetConst)
-	case KindI64:
+	case idl.KindI64:
 		fmt.Fprintf(w, "func (t %s) %s() int64 { return t.o.Int64(%s) }\n", structName, f.Name, offsetConst)
-	case KindF32:
+	case idl.KindF32:
 		fmt.Fprintf(w, "func (t %s) %s() float32 { return t.o.Float32(%s) }\n", structName, f.Name, offsetConst)
-	case KindF64:
+	case idl.KindF64:
 		fmt.Fprintf(w, "func (t %s) %s() float64 { return t.o.Float64(%s) }\n", structName, f.Name, offsetConst)
-	case KindText:
+	case idl.KindText:
 		fmt.Fprintf(w, "func (t %s) %s() string { return t.o.Text(%s) }\n", structName, f.Name, offsetConst)
-	case KindBytes:
+	case idl.KindBytes:
 		fmt.Fprintf(w, "func (t %s) %s() []byte { return t.o.Bytes(%s) }\n", structName, f.Name, offsetConst)
-	case KindBytesFixed:
+	case idl.KindBytesFixed:
 		fmt.Fprintf(w, "func (t %s) %s() [%d]byte {\n", structName, f.Name, f.Type.FixedSize)
 		fmt.Fprintf(w, "\tvar out [%d]byte\n", f.Type.FixedSize)
 		fmt.Fprintf(w, "\tcopy(out[:], t.o.BytesFixed(%s, %d))\n", offsetConst, f.Type.FixedSize)
 		w.WriteString("\treturn out\n")
 		w.WriteString("}\n")
-	case KindList:
+	case idl.KindList:
 		fmt.Fprintf(w, "func (t %s) %s() zap.List { return t.o.List(%s) }\n", structName, f.Name, offsetConst)
-	case KindStruct:
+	case idl.KindStruct:
 		fmt.Fprintf(w, "func (t %s) %s() %s { return %s{o: t.o.Object(%s)} }\n",
 			structName, f.Name, f.Type.StructName, f.Type.StructName, offsetConst)
 	}
 }
 
-func emitBuilder(w *bytes.Buffer, s *Struct) {
+func emitBuilder(w *bytes.Buffer, s *idl.Struct) {
 	// Input struct.
 	fmt.Fprintf(w, "\n// %sInput collects the field values for New%s.\n", s.Name, s.Name)
 	fmt.Fprintf(w, "type %sInput struct {\n", s.Name)
@@ -317,78 +318,78 @@ func emitBuilder(w *bytes.Buffer, s *Struct) {
 }
 
 // goInputType returns the Go type used in the Input struct.
-func goInputType(t Type) string {
+func goInputType(t idl.Type) string {
 	switch t.Kind {
-	case KindBool:
+	case idl.KindBool:
 		return "bool"
-	case KindU8:
+	case idl.KindU8:
 		return "uint8"
-	case KindU16:
+	case idl.KindU16:
 		return "uint16"
-	case KindU32:
+	case idl.KindU32:
 		return "uint32"
-	case KindU64:
+	case idl.KindU64:
 		return "uint64"
-	case KindI8:
+	case idl.KindI8:
 		return "int8"
-	case KindI16:
+	case idl.KindI16:
 		return "int16"
-	case KindI32:
+	case idl.KindI32:
 		return "int32"
-	case KindI64:
+	case idl.KindI64:
 		return "int64"
-	case KindF32:
+	case idl.KindF32:
 		return "float32"
-	case KindF64:
+	case idl.KindF64:
 		return "float64"
-	case KindText:
+	case idl.KindText:
 		return "string"
-	case KindBytes:
+	case idl.KindBytes:
 		return "[]byte"
-	case KindBytesFixed:
+	case idl.KindBytesFixed:
 		return fmt.Sprintf("[%d]byte", t.FixedSize)
-	case KindList:
+	case idl.KindList:
 		// Variable-element list: each entry is a pre-built sub-buffer.
 		return "[][]byte"
-	case KindStruct:
+	case idl.KindStruct:
 		// Nested struct: caller passes a pre-built sub-buffer.
 		return "[]byte"
 	}
 	return "any"
 }
 
-func emitFieldWriter(w *bytes.Buffer, lower string, f *Field) {
+func emitFieldWriter(w *bytes.Buffer, lower string, f *idl.Field) {
 	offsetConst := fmt.Sprintf("%s%sOff", lower, f.Name)
 	switch f.Type.Kind {
-	case KindBool:
+	case idl.KindBool:
 		fmt.Fprintf(w, "\tob.SetBool(%s, in.%s)\n", offsetConst, f.Name)
-	case KindU8:
+	case idl.KindU8:
 		fmt.Fprintf(w, "\tob.SetUint8(%s, in.%s)\n", offsetConst, f.Name)
-	case KindU16:
+	case idl.KindU16:
 		fmt.Fprintf(w, "\tob.SetUint16(%s, in.%s)\n", offsetConst, f.Name)
-	case KindU32:
+	case idl.KindU32:
 		fmt.Fprintf(w, "\tob.SetUint32(%s, in.%s)\n", offsetConst, f.Name)
-	case KindU64:
+	case idl.KindU64:
 		fmt.Fprintf(w, "\tob.SetUint64(%s, in.%s)\n", offsetConst, f.Name)
-	case KindI8:
+	case idl.KindI8:
 		fmt.Fprintf(w, "\tob.SetUint8(%s, uint8(in.%s))\n", offsetConst, f.Name)
-	case KindI16:
+	case idl.KindI16:
 		fmt.Fprintf(w, "\tob.SetUint16(%s, uint16(in.%s))\n", offsetConst, f.Name)
-	case KindI32:
+	case idl.KindI32:
 		fmt.Fprintf(w, "\tob.SetUint32(%s, uint32(in.%s))\n", offsetConst, f.Name)
-	case KindI64:
+	case idl.KindI64:
 		fmt.Fprintf(w, "\tob.SetUint64(%s, uint64(in.%s))\n", offsetConst, f.Name)
-	case KindF32:
+	case idl.KindF32:
 		fmt.Fprintf(w, "\tob.SetFloat32(%s, in.%s)\n", offsetConst, f.Name)
-	case KindF64:
+	case idl.KindF64:
 		fmt.Fprintf(w, "\tob.SetFloat64(%s, in.%s)\n", offsetConst, f.Name)
-	case KindText:
+	case idl.KindText:
 		fmt.Fprintf(w, "\tob.SetText(%s, in.%s)\n", offsetConst, f.Name)
-	case KindBytes:
+	case idl.KindBytes:
 		fmt.Fprintf(w, "\tob.SetBytes(%s, in.%s)\n", offsetConst, f.Name)
-	case KindBytesFixed:
+	case idl.KindBytesFixed:
 		fmt.Fprintf(w, "\tob.SetBytesFixed(%s, in.%s[:])\n", offsetConst, f.Name)
-	case KindList:
+	case idl.KindList:
 		listVar := lowerFirst(f.Name) + "LB"
 		fmt.Fprintf(w, "\t%s := b.StartList(0)\n", listVar)
 		fmt.Fprintf(w, "\tfor _, elem := range in.%s {\n", f.Name)
@@ -396,7 +397,7 @@ func emitFieldWriter(w *bytes.Buffer, lower string, f *Field) {
 		w.WriteString("\t}\n")
 		fmt.Fprintf(w, "\tob.SetList(%s, %s.FinishOffset(), len(in.%s))\n",
 			offsetConst, listVar, f.Name)
-	case KindStruct:
+	case idl.KindStruct:
 		// Nested struct: caller passes a built sub-buffer; embed it inline.
 		// We allocate via b.StartObject(len(in.X)) and copy the bytes.
 		fmt.Fprintf(w, "\tif len(in.%s) > 0 {\n", f.Name)
@@ -419,13 +420,13 @@ func emitFieldWriter(w *bytes.Buffer, lower string, f *Field) {
 // Ordinals are 1, 2, 3, … by declaration order, baked from the AST so the
 // wire ordinal never shifts when a method is appended. The wire envelope
 // is the runtime rpc package, shared with every other language runtime.
-func emitInterface(w *bytes.Buffer, iface *Interface) {
+func emitInterface(w *bytes.Buffer, iface *idl.Interface) {
 	emitOrdinals(w, iface)
 	emitClient(w, iface)
 	emitServer(w, iface)
 }
 
-func emitOrdinals(w *bytes.Buffer, iface *Interface) {
+func emitOrdinals(w *bytes.Buffer, iface *idl.Interface) {
 	fmt.Fprintf(w, "// Method ordinals for the %s service (stable 1-based wire ids).\n", iface.Name)
 	w.WriteString("const (\n")
 	for _, m := range iface.Methods {
@@ -436,7 +437,7 @@ func emitOrdinals(w *bytes.Buffer, iface *Interface) {
 
 // ordinalName is the exported const holding a method's wire ordinal,
 // e.g. interface Echo + method ping -> EchoPingOrdinal.
-func ordinalName(iface *Interface, m *Method) string {
+func ordinalName(iface *idl.Interface, m *idl.Method) string {
 	return iface.Name + exportIdent(m.Name) + "Ordinal"
 }
 
@@ -456,7 +457,7 @@ func exportIdent(s string) string {
 	return string(r)
 }
 
-func emitClient(w *bytes.Buffer, iface *Interface) {
+func emitClient(w *bytes.Buffer, iface *idl.Interface) {
 	// Channel: the seam the Client ships an envelope over and awaits a
 	// correlated response. A transport (e.g. a TCP RPC connection) supplies it.
 	fmt.Fprintf(w, "// %sChannel ships one Call envelope and awaits its correlated Response.\n", iface.Name)
@@ -495,7 +496,7 @@ func emitClient(w *bytes.Buffer, iface *Interface) {
 //
 // Both return the call's own rpc.Promise (so a chain of length > 2 can target
 // the previous link) alongside the method's natural result.
-func emitClientMethod(w *bytes.Buffer, iface *Interface, m *Method) {
+func emitClientMethod(w *bytes.Buffer, iface *idl.Interface, m *idl.Method) {
 	mname := exportIdent(m.Name)
 	arg, payload := methodArg(m)
 
@@ -557,14 +558,14 @@ func emitClientMethod(w *bytes.Buffer, iface *Interface, m *Method) {
 // methodArg returns the Go parameter list and the payload expression for a
 // method's request: ("req []byte", "req") when it has a request param, or
 // ("", "nil") for a void request.
-func methodArg(m *Method) (arg, payload string) {
+func methodArg(m *idl.Method) (arg, payload string) {
 	if m.Request == nil {
 		return "", "nil"
 	}
 	return m.Request.Name + " []byte", m.Request.Name
 }
 
-func emitServer(w *bytes.Buffer, iface *Interface) {
+func emitServer(w *bytes.Buffer, iface *idl.Interface) {
 	// Handler: the abstract server contract — one method per RPC method.
 	fmt.Fprintf(w, "// %sHandler is the server contract for the %s service. Implement each\n", iface.Name, iface.Name)
 	fmt.Fprintf(w, "// method, then route requests to it with Dispatch%s.\n", iface.Name)
@@ -599,7 +600,7 @@ func emitServer(w *bytes.Buffer, iface *Interface) {
 }
 
 // emitDispatchCase emits the body of one ordinal case in Dispatch<Iface>.
-func emitDispatchCase(w *bytes.Buffer, m *Method) {
+func emitDispatchCase(w *bytes.Buffer, m *idl.Method) {
 	mname := exportIdent(m.Name)
 	callArg := ""
 	if m.Request != nil {
