@@ -41,9 +41,17 @@ func TestRustGolden(t *testing.T) {
 			if !ok {
 				t.Fatalf("no %s among %v", name, keys(files))
 			}
-			want, err := os.ReadFile(filepath.Join("testdata", tc.golden))
+			path := filepath.Join("testdata", tc.golden)
+			if *update {
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("updated %s", path)
+				return
+			}
+			want, err := os.ReadFile(path)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("read golden %s: %v (run with -update)", path, err)
 			}
 			if !bytes.Equal(got, want) {
 				t.Errorf("emitted Rust differs from the golden.\n--- got ---\n%s", got)

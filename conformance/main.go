@@ -28,6 +28,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -274,6 +275,7 @@ func vector(w *bufio.Writer, id, chain, op string, b []byte) {
 			return
 		}
 		line(w, "W", id, hex.EncodeToString(out))
+		line(w, "EQ", id, same(out, b))
 		d, err = pchain.SpendOf(out)
 		lineErr(w, "RR", id, d, err)
 	case chain == "P" && op == "block":
@@ -288,6 +290,7 @@ func vector(w *bufio.Writer, id, chain, op string, b []byte) {
 			return
 		}
 		line(w, "W", id, hex.EncodeToString(out))
+		line(w, "EQ", id, same(out, b[xchain.Prefix:]))
 		d, err = xchain.SignedOf(prefixed(out))
 		lineErr(w, "RR", id, d, err)
 	case chain == "X" && op == "block":
@@ -310,6 +313,38 @@ func zapBody(chain, op string, b []byte) []byte {
 // read by the same reader that read the original.
 func prefixed(b []byte) []byte {
 	return append([]byte{0, 0}, b...)
+}
+
+// same says whether what the generated builder wrote is what the chain
+// wrote. A chain vector may carry more than one message — a P transaction is
+// its unsigned bytes with a credential message concatenated — so the
+// comparison is against the FIRST message, whose length its own header
+// declares. "no" carries where the two part, because a byte offset is the
+// only useful thing to say about a disagreement of bytes.
+func same(built, wire []byte) string {
+	n := declared(wire)
+	if n == 0 || n > len(wire) {
+		return "no;the vector declares no message"
+	}
+	head := wire[:n]
+	if len(built) != len(head) {
+		return fmt.Sprintf("no;size=%d;chain=%d", len(built), len(head))
+	}
+	for i := range built {
+		if built[i] != head[i] {
+			return fmt.Sprintf("no;at=%d", i)
+		}
+	}
+	return "yes"
+}
+
+// declared is the message size the ZAP header states, or 0 for bytes that do
+// not open one.
+func declared(b []byte) int {
+	if len(b) < zap.HeaderSize {
+		return 0
+	}
+	return int(binary.LittleEndian.Uint32(b[12:16]))
 }
 
 func line(w *bufio.Writer, kind, id, body string) {

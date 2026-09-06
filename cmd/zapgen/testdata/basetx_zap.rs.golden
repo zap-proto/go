@@ -57,12 +57,12 @@ impl<'a> BaseTx<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(BASE_TX_OUTS)
+    pub fn outs(&self) -> TransferableOutputList<'a> {
+        TransferableOutputList { l: self.o.list_stride(BASE_TX_OUTS, TRANSFERABLE_OUTPUT_SIZE) }
     }
 
-    pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(BASE_TX_INS)
+    pub fn ins(&self) -> TransferableInputList<'a> {
+        TransferableInputList { l: self.o.list_stride(BASE_TX_INS, TRANSFERABLE_INPUT_SIZE) }
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -94,21 +94,207 @@ impl<'a> Default for BaseTxInput<'a> {
 
 /// Write a BaseTx message and answer its bytes.
 pub fn new_base_tx(input: &BaseTxInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_outs = 0;
+    if !input.outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.outs {
+            let mut rec = [0u8; TRANSFERABLE_OUTPUT_SIZE];
+            let n = elem.len().min(TRANSFERABLE_OUTPUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_outs = lb.finish_offset();
+    }
+    let mut at_ins = 0;
+    if !input.ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.ins {
+            let mut rec = [0u8; TRANSFERABLE_INPUT_SIZE];
+            let n = elem.len().min(TRANSFERABLE_INPUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_ins = lb.finish_offset();
+    }
     let mut ob = b.start_object(BASE_TX_SIZE);
     ob.set_u32(&mut b, BASE_TX_NETWORK_ID, input.network_id);
     ob.set_bytes_fixed(&mut b, BASE_TX_BLOCKCHAIN_ID, input.blockchain_id);
-    let mut list_outs = b.start_list();
-    for elem in input.outs {
-        list_outs.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BASE_TX_OUTS, list_outs.finish_offset(), input.outs.len());
-    let mut list_ins = b.start_list();
-    for elem in input.ins {
-        list_ins.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BASE_TX_INS, list_ins.finish_offset(), input.ins.len());
+    ob.set_list(&mut b, BASE_TX_OUTS, at_outs, input.outs.len());
+    ob.set_list(&mut b, BASE_TX_INS, at_ins, input.ins.len());
     ob.set_bytes(&mut b, BASE_TX_MEMO, input.memo);
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+
+// TransferableOutput — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_OUTPUT_OFFSET: usize = 0;
+pub const TRANSFERABLE_OUTPUT_SIZE: usize = 4;
+
+/// A view of a ZAP-encoded TransferableOutput. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableOutput<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> TransferableOutput<'a> {
+    /// Take `data` as a TransferableOutput message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(TransferableOutput {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        TransferableOutput { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.o.u32(TRANSFERABLE_OUTPUT_OFFSET)
+    }
+
+    /// The TRANSFERABLE_OUTPUT_SIZE bytes this TransferableOutput occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, TRANSFERABLE_OUTPUT_SIZE)
+    }
+}
+
+/// A run of TransferableOutput records, TRANSFERABLE_OUTPUT_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableOutputList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> TransferableOutputList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent TransferableOutput past the end.
+    pub fn at(&self, i: usize) -> TransferableOutput<'a> {
+        TransferableOutput::new(self.l.object(i, TRANSFERABLE_OUTPUT_SIZE))
+    }
+}
+
+/// The field values [`new_transferable_output`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableOutputInput {
+    pub offset: u32,
+}
+
+impl Default for TransferableOutputInput {
+    fn default() -> Self {
+        TransferableOutputInput {
+            offset: 0,
+        }
+    }
+}
+
+/// Write a TransferableOutput message and answer its bytes.
+pub fn new_transferable_output(input: &TransferableOutputInput) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut ob = b.start_object(TRANSFERABLE_OUTPUT_SIZE);
+    ob.set_u32(&mut b, TRANSFERABLE_OUTPUT_OFFSET, input.offset);
+    ob.finish_as_root(&mut b);
+    b.finish()
+}
+
+// TransferableInput — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_INPUT_OFFSET: usize = 0;
+pub const TRANSFERABLE_INPUT_SIZE: usize = 4;
+
+/// A view of a ZAP-encoded TransferableInput. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInput<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> TransferableInput<'a> {
+    /// Take `data` as a TransferableInput message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(TransferableInput {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        TransferableInput { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.o.u32(TRANSFERABLE_INPUT_OFFSET)
+    }
+
+    /// The TRANSFERABLE_INPUT_SIZE bytes this TransferableInput occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, TRANSFERABLE_INPUT_SIZE)
+    }
+}
+
+/// A run of TransferableInput records, TRANSFERABLE_INPUT_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInputList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> TransferableInputList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent TransferableInput past the end.
+    pub fn at(&self, i: usize) -> TransferableInput<'a> {
+        TransferableInput::new(self.l.object(i, TRANSFERABLE_INPUT_SIZE))
+    }
+}
+
+/// The field values [`new_transferable_input`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInputInput {
+    pub offset: u32,
+}
+
+impl Default for TransferableInputInput {
+    fn default() -> Self {
+        TransferableInputInput {
+            offset: 0,
+        }
+    }
+}
+
+/// Write a TransferableInput message and answer its bytes.
+pub fn new_transferable_input(input: &TransferableInputInput) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let mut ob = b.start_object(TRANSFERABLE_INPUT_SIZE);
+    ob.set_u32(&mut b, TRANSFERABLE_INPUT_OFFSET, input.offset);
     ob.finish_as_root(&mut b);
     b.finish()
 }

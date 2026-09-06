@@ -13,3 +13,9 @@ struct BaseTx
     Outs         list<TransferableOutput>
     Ins          list<TransferableInput>
     Memo         bytes
+
+struct TransferableOutput
+    Offset u32
+
+struct TransferableInput
+    Offset u32

@@ -4,6 +4,7 @@
 package zap
 
 import (
+	"encoding/binary"
 	"testing"
 )
 
@@ -457,5 +458,64 @@ func TestEmbedRefusesWhatIsNotAMessage(t *testing.T) {
 		if at := b.Embed(bad); at != 0 {
 			t.Errorf("Embed(%d bytes) = %d, want 0", len(bad), at)
 		}
+	}
+}
+
+// TestStrideRefusesACountThatCannotFit — a list's declared count is a peer's
+// word. List() can only weigh it against the message, because the wire says
+// nothing about how wide an element is; a reader that knows the width can
+// refuse the count outright, and does.
+func TestStrideRefusesACountThatCannotFit(t *testing.T) {
+	b := NewBuilderV2(256)
+	lb := b.StartList(8)
+	for i := 0; i < 3; i++ {
+		lb.AddUint64(uint64(i))
+	}
+	ob := b.StartObject(8)
+	ob.SetList(0, lb.FinishOffset(), 3)
+	ob.FinishAsRoot()
+	msg := b.Finish()
+
+	root, err := Parse(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Root().ListStride(0, 8).Len(); got != 3 {
+		t.Errorf("an honest count is refused: len = %d, want 3", got)
+	}
+
+	// Forge the count: three 8-byte elements become forty. Forty is smaller
+	// than the message, so the count alone looks plausible; forty EIGHT-byte
+	// elements do not fit in what is left of it.
+	forged := append([]byte(nil), msg...)
+	listPos := int(root.Root().offset) + 4
+	binary.LittleEndian.PutUint32(forged[listPos:], 40)
+	m, err := Parse(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Root().List(0).Len(); got != 40 {
+		t.Errorf("List() weighs the count against the message only: len = %d, want 40", got)
+	}
+	if got := m.Root().ListStride(0, 8).Len(); got != 0 {
+		t.Errorf("a count that cannot fit is refused: len = %d, want 0", got)
+	}
+}
+
+// TestStrideZeroIsTheUntightenedRead — 0 means the schema did not state a
+// width, and answers exactly what List() answers.
+func TestStrideZeroIsTheUntightenedRead(t *testing.T) {
+	b := NewBuilderV2(64)
+	lb := b.StartList(0)
+	lb.AddObjectBytes([]byte("one"))
+	ob := b.StartObject(8)
+	ob.SetList(0, lb.FinishOffset(), 1)
+	ob.FinishAsRoot()
+	m, err := Parse(b.Finish())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Root().ListStride(0, 0).Len() != m.Root().List(0).Len() {
+		t.Error("a stride of zero should read exactly as List does")
 	}
 }

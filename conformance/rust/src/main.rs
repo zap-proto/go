@@ -283,6 +283,7 @@ fn vector(w: &Sink, id: &str, chain: &str, op: &str, b: &[u8]) {
                 }
             };
             line(w, "W", id, &hex(&out));
+            line(w, "EQ", id, &same(&out, b));
             line_err(w, "RR", id, digest::spend_of(&out));
         }
         ("P", "block") => line_err(w, "R", id, digest::block_of(b)),
@@ -296,11 +297,45 @@ fn vector(w: &Sink, id: &str, chain: &str, op: &str, b: &[u8]) {
                 }
             };
             line(w, "W", id, &hex(&out));
+            line(w, "EQ", id, &same(&out, &b[digest::PREFIX..]));
             line_err(w, "RR", id, digest::signed_of(&prefixed(&out)));
         }
         ("X", "block") => line_err(w, "R", id, digest::x_block_of(b)),
         _ => {}
     }
+}
+
+/// Whether what the generated builder wrote is what the chain wrote.
+///
+/// A chain vector may carry more than one message — a P transaction is its
+/// unsigned bytes with a credential message concatenated — so the comparison
+/// is against the FIRST message, whose length its own header declares. "no"
+/// carries where the two part, because a byte offset is the only useful thing
+/// to say about a disagreement of bytes.
+fn same(built: &[u8], wire: &[u8]) -> String {
+    let n = declared(wire);
+    if n == 0 || n > wire.len() {
+        return "no;the vector declares no message".to_string();
+    }
+    let head = &wire[..n];
+    if built.len() != head.len() {
+        return format!("no;size={};chain={}", built.len(), head.len());
+    }
+    for (i, (a, b)) in built.iter().zip(head.iter()).enumerate() {
+        if a != b {
+            return format!("no;at={i}");
+        }
+    }
+    "yes".to_string()
+}
+
+/// The message size the ZAP header states, or 0 for bytes that do not open
+/// one.
+fn declared(b: &[u8]) -> usize {
+    if b.len() < zap::HEADER_SIZE {
+        return 0;
+    }
+    u32::from_le_bytes([b[12], b[13], b[14], b[15]]) as usize
 }
 
 /// Strip the chain's own framing. An X TRANSACTION carries a type byte and a

@@ -29,6 +29,15 @@ func WrapLeaf(b []byte) (Leaf, error) {
 func (t Leaf) Tag() uint32  { return t.o.Uint32(leafTagOff) }
 func (t Leaf) Note() string { return t.o.Text(leafNoteOff) }
 
+// LeafList is a run of Leaf entries, each behind its length.
+type LeafList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x LeafList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent Leaf past the end.
+func (x LeafList) At(i int) Leaf { return Leaf{o: x.l.ObjectAt(i)} }
+
 // LeafInput collects the field values for NewLeaf.
 type LeafInput struct {
 	Tag  uint32
@@ -37,7 +46,7 @@ type LeafInput struct {
 
 // NewLeaf builds a ZAP-encoded Leaf message from in and returns the bytes.
 func NewLeaf(in LeafInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(leafSize)
 	ob.SetUint32(leafTagOff, in.Tag)
 	ob.SetText(leafNoteOff, in.Note)
@@ -96,7 +105,7 @@ func (t All) Id() [16]byte {
 	copy(out[:], t.o.BytesFixed(allIdOff, 16))
 	return out
 }
-func (t All) Items() zap.List { return t.o.List(allItemsOff) }
+func (t All) Items() LeafList { return LeafList{l: t.o.List(allItemsOff)} }
 func (t All) Inner() Leaf     { return Leaf{o: t.o.Object(allInnerOff)} }
 
 // AllInput collects the field values for NewAll.
@@ -121,7 +130,16 @@ type AllInput struct {
 
 // NewAll builds a ZAP-encoded All message from in and returns the bytes.
 func NewAll(in AllInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	itemsAt := 0
+	if len(in.Items) > 0 {
+		lb := b.StartList(0)
+		for _, elem := range in.Items {
+			lb.AddObjectBytes(elem)
+		}
+		itemsAt = lb.FinishOffset()
+	}
+	innerAt := b.Embed(in.Inner)
 	ob := b.StartObject(allSize)
 	ob.SetBool(allFlagOff, in.Flag)
 	ob.SetUint8(allA8Off, in.A8)
@@ -137,12 +155,8 @@ func NewAll(in AllInput) []byte {
 	ob.SetText(allNameOff, in.Name)
 	ob.SetBytes(allBlobOff, in.Blob)
 	ob.SetBytesFixed(allIdOff, in.Id[:])
-	itemsLB := b.StartList(0)
-	for _, elem := range in.Items {
-		itemsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(allItemsOff, itemsLB.FinishOffset(), len(in.Items))
-	ob.SetObject(allInnerOff, b.Embed(in.Inner))
+	ob.SetList(allItemsOff, itemsAt, len(in.Items))
+	ob.SetObject(allInnerOff, innerAt)
 	ob.FinishAsRoot()
 	return b.Finish()
 }

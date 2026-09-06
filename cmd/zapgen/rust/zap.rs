@@ -339,6 +339,28 @@ impl<'a> Object<'a> {
             present: true,
         }
     }
+
+    /// The list `field` points at, whose elements are `stride` bytes wide.
+    ///
+    /// [`Object::list`] can do no better than "the count is no larger than the
+    /// message", because the wire carries a start and a count and nothing
+    /// about how wide an element is. A caller generated from a schema DOES
+    /// know the width, and the tight bound is the one worth checking: a count
+    /// that cannot fit `stride` bytes per element in what is left of the
+    /// message is refused once, here, rather than surviving to be the trip
+    /// count of every loop over it.
+    ///
+    /// A stride of 0 means "not stated", and answers exactly [`Object::list`].
+    pub fn list_stride(&self, field: usize, stride: usize) -> List<'a> {
+        let l = self.list(field);
+        if stride == 0 || !l.present {
+            return l;
+        }
+        if l.length > (self.data.len() - l.offset) / stride {
+            return List::null();
+        }
+        l
+    }
 }
 
 /// A view onto one list. What an element IS depends on which accessor is

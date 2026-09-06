@@ -3,6 +3,8 @@
 
 package main
 
+import "fmt"
+
 // AST types for the .zap schema DSL.
 //
 // Single source file produces one File. The File carries a package name
@@ -68,6 +70,12 @@ type Type struct {
 	FixedSize  int    // bytes_fixed[N]
 	ListElem   *Type  // list<T>
 	StructName string // nested struct by name
+
+	// Stride is how wide one element of a list<T> is, or 0 when the element
+	// has no width the schema can state. It is filled in by Resolve, once,
+	// so no backend has to work it out again — and no two of them can work
+	// it out differently.
+	Stride int
 }
 
 // TypeKind enumerates the schema's primitive type tags.
@@ -152,6 +160,93 @@ func (t Type) SlotSize() int {
 		return 8
 	case KindStruct:
 		return 4
+	}
+	return 0
+}
+
+// Resolve fills in what the schema says but does not spell: how wide one
+// element of each list is.
+//
+// A list carries its elements one of two ways, and which one is a property of
+// the ELEMENT, not a flag anyone writes:
+//
+//   - an element whose width is in the schema — a scalar, a bytes_fixed[N], a
+//     struct whose every field is one of those — is written at that width,
+//     back to back. That is a STRIDE list, and it is what every Lux chain
+//     puts on the wire: a run of 72-byte outputs, of 96-byte inputs, of
+//     20-byte addresses, of 4-byte indices.
+//
+//   - an element whose width is not in the schema — bytes, text, a struct
+//     with a tail — is written behind a four-byte length, because nothing
+//     else can say where the next one starts.
+//
+// No annotation decides this and none could: a schema that had to be told
+// which shape it meant would be a schema that could be told wrong.
+func Resolve(f *File) error {
+	declared := make(map[string]*Struct, len(f.Structs))
+	for _, s := range f.Structs {
+		declared[s.Name] = s
+	}
+	for _, s := range f.Structs {
+		for _, fd := range s.Fields {
+			if fd.Type.Kind != KindList {
+				continue
+			}
+			elem := fd.Type.ListElem
+			if elem == nil {
+				return fmt.Errorf("struct %s field %s: list of nothing", s.Name, fd.Name)
+			}
+			if elem.Kind == KindList {
+				return fmt.Errorf("struct %s field %s: a list of lists has no shape on the wire", s.Name, fd.Name)
+			}
+			if elem.Kind == KindStruct {
+				es, ok := declared[elem.StructName]
+				if !ok {
+					return fmt.Errorf("struct %s field %s: list of undeclared struct %s", s.Name, fd.Name, elem.StructName)
+				}
+				if inline(es) {
+					fd.Type.Stride = structSize(es)
+				}
+				continue
+			}
+			fd.Type.Stride = width(*elem)
+		}
+	}
+	return nil
+}
+
+// inline reports whether a struct is entirely its own bytes — every field a
+// scalar or a bytes_fixed[N]. Such a struct is a record: copy its bytes and
+// it is still itself, which is what lets a list hold a run of them.
+//
+// A field that points elsewhere (bytes, text, list, a nested struct) is not
+// copyable that way. Its pointer is relative to where the pointer sits, so a
+// record moved into a list would name whatever now lies at that distance.
+func inline(s *Struct) bool {
+	for _, f := range s.Fields {
+		switch f.Type.Kind {
+		case KindBytes, KindText, KindList, KindStruct:
+			return false
+		}
+	}
+	return len(s.Fields) > 0
+}
+
+// width is how many bytes a value of t occupies where it lies, for the types
+// that lie somewhere: a scalar and a bytes_fixed[N]. Everything else answers
+// 0, meaning "not stated here".
+func width(t Type) int {
+	switch t.Kind {
+	case KindBool, KindU8, KindI8:
+		return 1
+	case KindU16, KindI16:
+		return 2
+	case KindU32, KindI32, KindF32:
+		return 4
+	case KindU64, KindI64, KindF64:
+		return 8
+	case KindBytesFixed:
+		return t.FixedSize
 	}
 	return 0
 }

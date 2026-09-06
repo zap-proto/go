@@ -35,13 +35,13 @@ func SignedOf(b []byte) (string, error) {
 				inner[0], inner[1], base.NetworkID(), base.BlockchainID(), base.Memo(), base.Outs().Len())
 			outs := base.Outs()
 			for i := 0; i < outs.Len(); i++ {
-				p := Ptr{o: outs.Object(i, ptrSize)}
+				p := outs.At(i)
 				fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
 			}
 			ins := base.Ins()
 			fmt.Fprintf(&w, "];ins=%d[", ins.Len())
 			for i := 0; i < ins.Len(); i++ {
-				p := Ptr{o: ins.Object(i, ptrSize)}
+				p := ins.At(i)
 				fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
 			}
 			w.WriteString("]}")
@@ -84,7 +84,7 @@ func BlockOf(b []byte) (string, error) {
 	lens := t.TxLengths()
 	fmt.Fprintf(&w, ";txlens=%d[", lens.Len())
 	for i := 0; i < lens.Len(); i++ {
-		p := Ptr{o: lens.Object(i, ptrSize)}
+		p := lens.At(i)
 		fmt.Fprintf(&w, "%d:%d;", i, p.Offset())
 	}
 	w.WriteString("]")

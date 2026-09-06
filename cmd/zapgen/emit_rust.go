@@ -99,6 +99,7 @@ func emitRustModule(f *File, runtimePath string) ([]byte, error) {
 		}
 		emitRustOffsets(&w, s)
 		emitRustReader(&w, s)
+		emitRustList(&w, f, s)
 		emitRustBuilder(&w, s)
 	}
 	for _, iface := range f.Interfaces {
@@ -153,6 +154,14 @@ func emitRustReader(w *bytes.Buffer, s *Struct) {
 		w.WriteString("\n")
 		emitRustFieldReader(w, prefix, f)
 	}
+	if inline(s) {
+		// A record is entirely its own bytes, so it can answer them: what a
+		// list element holds, and what writing one back needs.
+		fmt.Fprintf(w, "\n    /// The %s_SIZE bytes this %s occupies where it lies.\n", prefix, s.Name)
+		w.WriteString("    pub fn record(&self) -> &'a [u8] {\n")
+		fmt.Fprintf(w, "        self.o.bytes_fixed(0, %s_SIZE)\n", prefix)
+		w.WriteString("    }\n")
+	}
 	w.WriteString("}\n\n")
 }
 
@@ -180,7 +189,16 @@ func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
 		fmt.Fprintf(w, "            .unwrap_or(&[0u8; %d])\n", n)
 		w.WriteString("    }\n")
 	case KindList:
-		fmt.Fprintf(w, "    pub fn %s(&self) -> zap::List<'a> {\n        self.o.list(%s)\n    }\n", name, off)
+		elem := f.Type.ListElem
+		if elem.Kind == KindStruct {
+			// A typed element accessor: the list answers its own element
+			// type, so no caller is told again how wide a record is.
+			fmt.Fprintf(w, "    pub fn %s(&self) -> %sList<'a> {\n        %sList { l: %s }\n    }\n",
+				name, elem.StructName, elem.StructName, rustListRead(off, f.Type))
+			return
+		}
+		fmt.Fprintf(w, "    pub fn %s(&self) -> zap::List<'a> {\n        %s\n    }\n",
+			name, rustListRead(off, f.Type))
 	case KindStruct:
 		fmt.Fprintf(w, "    pub fn %s(&self) -> %s<'a> {\n        %s::new(self.o.object(%s))\n    }\n",
 			name, f.Type.StructName, f.Type.StructName, off)
@@ -218,8 +236,13 @@ func emitRustBuilder(w *bytes.Buffer, s *Struct) {
 
 	fmt.Fprintf(w, "/// Write a %s message and answer its bytes.\n", s.Name)
 	fmt.Fprintf(w, "pub fn %s(input: &%s%s) -> Vec<u8> {\n", rustBuildName(s), input, rustAnonLife(borrows))
-	w.WriteString("    let mut b = zap::Builder::new(256);\n")
+	w.WriteString("    let mut b = zap::Builder::new_v2(256);\n")
 	prefix := screamCase(s.Name)
+	// What a pointer will name goes down first, in field order; the object
+	// last. That is the order the P, X and Q wires are already written in.
+	for _, f := range s.Fields {
+		emitRustTail(w, f)
+	}
 	fmt.Fprintf(w, "    let mut ob = b.start_object(%s_SIZE);\n", prefix)
 	for _, f := range s.Fields {
 		emitRustFieldWriter(w, prefix, f)
@@ -244,17 +267,61 @@ func emitRustFieldWriter(w *bytes.Buffer, prefix string, f *Field) {
 	case KindBytesFixed:
 		fmt.Fprintf(w, "    ob.set_bytes_fixed(&mut b, %s, input.%s);\n", off, name)
 	case KindList:
-		fmt.Fprintf(w, "    let mut list_%s = b.start_list();\n", name)
-		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
-		fmt.Fprintf(w, "        list_%s.add_object_bytes(&mut b, elem);\n", name)
-		w.WriteString("    }\n")
-		fmt.Fprintf(w, "    ob.set_list(&mut b, %s, list_%s.finish_offset(), input.%s.len());\n", off, name, name)
+		fmt.Fprintf(w, "    ob.set_list(&mut b, %s, at_%s, input.%s.len());\n", off, name, name)
 	case KindStruct:
-		// Nested struct: the caller passes a message it built already. Embed
-		// copies it and answers where its ROOT lands — a pointer to the head
-		// of the copy would name the copy's header, not its first field.
-		fmt.Fprintf(w, "    let at_%s = b.embed(input.%s);\n", name, name)
 		fmt.Fprintf(w, "    ob.set_object(&mut b, %s, at_%s);\n", off, name)
+	}
+}
+
+// rustListRead is the read a list field answers: the tight one when the
+// schema states how wide an element is, the plain one when it does not.
+func rustListRead(off string, t Type) string {
+	if t.Stride > 0 {
+		return fmt.Sprintf("self.o.list_stride(%s, %s)", off, rustStride(t))
+	}
+	return fmt.Sprintf("self.o.list(%s)", off)
+}
+
+// rustStride is how the width of one element is spelled: the element struct's
+// own SIZE, so the number lives in one place, or the literal width of a value
+// that has no struct to hold it.
+func rustStride(t Type) string {
+	if t.ListElem.Kind == KindStruct {
+		return screamCase(t.ListElem.StructName) + "_SIZE"
+	}
+	return fmt.Sprint(t.Stride)
+}
+
+// emitRustTail writes what a pointer field will name, ahead of the object
+// that names it — the order the chains write, so the object's pointer leads
+// backward into bytes already down.
+func emitRustTail(w *bytes.Buffer, f *Field) {
+	name := rustIdent(snakeCase2(f.Name))
+	switch f.Type.Kind {
+	case KindList:
+		fmt.Fprintf(w, "    let mut at_%s = 0;\n", name)
+		fmt.Fprintf(w, "    if !input.%s.is_empty() {\n", name)
+		w.WriteString("        let mut lb = b.start_list();\n")
+		fmt.Fprintf(w, "        for elem in input.%s {\n", name)
+		if f.Type.Stride > 0 {
+			// A record is exactly as wide as the schema says, whatever the
+			// caller handed over: short is zero-filled, long is cut.
+			fmt.Fprintf(w, "            let mut rec = [0u8; %s];\n", rustStride(f.Type))
+			fmt.Fprintf(w, "            let n = elem.len().min(%s);\n", rustStride(f.Type))
+			w.WriteString("            rec[..n].copy_from_slice(&elem[..n]);\n")
+			w.WriteString("            lb.add_bytes(&mut b, &rec);\n")
+		} else {
+			w.WriteString("            lb.add_object_bytes(&mut b, elem);\n")
+		}
+		w.WriteString("        }\n")
+		fmt.Fprintf(w, "        at_%s = lb.finish_offset();\n", name)
+		w.WriteString("    }\n")
+	case KindStruct:
+		// Embed copies the message the caller built and answers where its
+		// ROOT landed. A pointer to the head of the copy would name the
+		// copy's header, and a reader would answer "ZAP" where the first
+		// field belongs.
+		fmt.Fprintf(w, "    let at_%s = b.embed(input.%s);\n", name, name)
 	}
 }
 
@@ -561,4 +628,37 @@ func rustIdent(s string) string {
 		return "r#" + s
 	}
 	return s
+}
+
+// emitRustList writes the typed list a field of s's element type answers,
+// beside the struct it holds. It is what retires `list.object(i, SIZE)` from
+// every caller: the width is stated once, by the generator that knows it.
+func emitRustList(w *bytes.Buffer, f *File, s *Struct) {
+	if !elements(f)[s.Name] {
+		return
+	}
+	prefix := screamCase(s.Name)
+	if inline(s) {
+		fmt.Fprintf(w, "/// A run of %s records, %s_SIZE bytes each.\n", s.Name, prefix)
+	} else {
+		fmt.Fprintf(w, "/// A run of %s entries, each behind its length.\n", s.Name)
+	}
+	w.WriteString("#[derive(Clone, Copy, Debug)]\n")
+	fmt.Fprintf(w, "pub struct %sList<'a> {\n", s.Name)
+	w.WriteString("    l: zap::List<'a>,\n")
+	w.WriteString("}\n\n")
+	fmt.Fprintf(w, "impl<'a> %sList<'a> {\n", s.Name)
+	w.WriteString("    /// How many elements the list holds.\n")
+	w.WriteString("    pub fn len(&self) -> usize {\n        self.l.len()\n    }\n\n")
+	w.WriteString("    /// Whether the list holds none.\n")
+	w.WriteString("    pub fn is_empty(&self) -> bool {\n        self.l.len() == 0\n    }\n\n")
+	fmt.Fprintf(w, "    /// Element `i`, or the absent %s past the end.\n", s.Name)
+	fmt.Fprintf(w, "    pub fn at(&self, i: usize) -> %s<'a> {\n", s.Name)
+	if inline(s) {
+		fmt.Fprintf(w, "        %s::new(self.l.object(i, %s_SIZE))\n", s.Name, prefix)
+	} else {
+		fmt.Fprintf(w, "        %s::new(self.l.object_at(i))\n", s.Name)
+	}
+	w.WriteString("    }\n")
+	w.WriteString("}\n\n")
 }

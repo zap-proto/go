@@ -76,7 +76,7 @@ impl<'a> Default for SignedInput<'a> {
 
 /// Write a Signed message and answer its bytes.
 pub fn new_signed(input: &SignedInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(SIGNED_SIZE);
     ob.set_bytes(&mut b, SIGNED_UNSIGNED, input.unsigned);
     ob.set_u32(&mut b, SIGNED_CREDENTIAL_COUNT, input.credential_count);
@@ -131,12 +131,12 @@ impl<'a> Base<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(BASE_OUTS)
+    pub fn outs(&self) -> PtrList<'a> {
+        PtrList { l: self.o.list_stride(BASE_OUTS, PTR_SIZE) }
     }
 
-    pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(BASE_INS)
+    pub fn ins(&self) -> PtrList<'a> {
+        PtrList { l: self.o.list_stride(BASE_INS, PTR_SIZE) }
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -168,20 +168,34 @@ impl<'a> Default for BaseInput<'a> {
 
 /// Write a Base message and answer its bytes.
 pub fn new_base(input: &BaseInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_outs = 0;
+    if !input.outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.outs {
+            let mut rec = [0u8; PTR_SIZE];
+            let n = elem.len().min(PTR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_outs = lb.finish_offset();
+    }
+    let mut at_ins = 0;
+    if !input.ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.ins {
+            let mut rec = [0u8; PTR_SIZE];
+            let n = elem.len().min(PTR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_ins = lb.finish_offset();
+    }
     let mut ob = b.start_object(BASE_SIZE);
     ob.set_u32(&mut b, BASE_NETWORK_ID, input.network_id);
     ob.set_bytes_fixed(&mut b, BASE_BLOCKCHAIN_ID, input.blockchain_id);
-    let mut list_outs = b.start_list();
-    for elem in input.outs {
-        list_outs.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BASE_OUTS, list_outs.finish_offset(), input.outs.len());
-    let mut list_ins = b.start_list();
-    for elem in input.ins {
-        list_ins.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BASE_INS, list_ins.finish_offset(), input.ins.len());
+    ob.set_list(&mut b, BASE_OUTS, at_outs, input.outs.len());
+    ob.set_list(&mut b, BASE_INS, at_ins, input.ins.len());
     ob.set_bytes(&mut b, BASE_MEMO, input.memo);
     ob.finish_as_root(&mut b);
     b.finish()
@@ -220,6 +234,34 @@ impl<'a> Ptr<'a> {
     pub fn offset(&self) -> u32 {
         self.o.u32(PTR_OFFSET)
     }
+
+    /// The PTR_SIZE bytes this Ptr occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, PTR_SIZE)
+    }
+}
+
+/// A run of Ptr records, PTR_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct PtrList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> PtrList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent Ptr past the end.
+    pub fn at(&self, i: usize) -> Ptr<'a> {
+        Ptr::new(self.l.object(i, PTR_SIZE))
+    }
 }
 
 /// The field values [`new_ptr`] writes.
@@ -238,7 +280,7 @@ impl Default for PtrInput {
 
 /// Write a Ptr message and answer its bytes.
 pub fn new_ptr(input: &PtrInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(PTR_SIZE);
     ob.set_u32(&mut b, PTR_OFFSET, input.offset);
     ob.finish_as_root(&mut b);
@@ -304,8 +346,8 @@ impl<'a> Block<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn tx_lengths(&self) -> zap::List<'a> {
-        self.o.list(BLOCK_TX_LENGTHS)
+    pub fn tx_lengths(&self) -> PtrList<'a> {
+        PtrList { l: self.o.list_stride(BLOCK_TX_LENGTHS, PTR_SIZE) }
     }
 
     pub fn tx_blob(&self) -> &'a [u8] {
@@ -339,17 +381,24 @@ impl<'a> Default for BlockInput<'a> {
 
 /// Write a Block message and answer its bytes.
 pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_tx_lengths = 0;
+    if !input.tx_lengths.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.tx_lengths {
+            let mut rec = [0u8; PTR_SIZE];
+            let n = elem.len().min(PTR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_tx_lengths = lb.finish_offset();
+    }
     let mut ob = b.start_object(BLOCK_SIZE);
     ob.set_bytes_fixed(&mut b, BLOCK_PARENT, input.parent);
     ob.set_u64(&mut b, BLOCK_HEIGHT, input.height);
     ob.set_u64(&mut b, BLOCK_TIME, input.time);
     ob.set_bytes_fixed(&mut b, BLOCK_ROOT, input.root);
-    let mut list_tx_lengths = b.start_list();
-    for elem in input.tx_lengths {
-        list_tx_lengths.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BLOCK_TX_LENGTHS, list_tx_lengths.finish_offset(), input.tx_lengths.len());
+    ob.set_list(&mut b, BLOCK_TX_LENGTHS, at_tx_lengths, input.tx_lengths.len());
     ob.set_bytes(&mut b, BLOCK_TX_BLOB, input.tx_blob);
     ob.finish_as_root(&mut b);
     b.finish()

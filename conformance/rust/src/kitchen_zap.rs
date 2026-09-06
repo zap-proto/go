@@ -51,6 +51,29 @@ impl<'a> Leaf<'a> {
     }
 }
 
+/// A run of Leaf entries, each behind its length.
+#[derive(Clone, Copy, Debug)]
+pub struct LeafList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> LeafList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent Leaf past the end.
+    pub fn at(&self, i: usize) -> Leaf<'a> {
+        Leaf::new(self.l.object_at(i))
+    }
+}
+
 /// The field values [`new_leaf`] writes.
 #[derive(Clone, Copy, Debug)]
 pub struct LeafInput<'a> {
@@ -69,7 +92,7 @@ impl<'a> Default for LeafInput<'a> {
 
 /// Write a Leaf message and answer its bytes.
 pub fn new_leaf(input: &LeafInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(LEAF_SIZE);
     ob.set_u32(&mut b, LEAF_TAG, input.tag);
     ob.set_text(&mut b, LEAF_NOTE, input.note);
@@ -182,8 +205,8 @@ impl<'a> All<'a> {
             .unwrap_or(&[0u8; 16])
     }
 
-    pub fn items(&self) -> zap::List<'a> {
-        self.o.list(ALL_ITEMS)
+    pub fn items(&self) -> LeafList<'a> {
+        LeafList { l: self.o.list(ALL_ITEMS) }
     }
 
     pub fn inner(&self) -> Leaf<'a> {
@@ -237,7 +260,16 @@ impl<'a> Default for AllInput<'a> {
 
 /// Write a All message and answer its bytes.
 pub fn new_all(input: &AllInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_items = 0;
+    if !input.items.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.items {
+            lb.add_object_bytes(&mut b, elem);
+        }
+        at_items = lb.finish_offset();
+    }
+    let at_inner = b.embed(input.inner);
     let mut ob = b.start_object(ALL_SIZE);
     ob.set_bool(&mut b, ALL_FLAG, input.flag);
     ob.set_u8(&mut b, ALL_A8, input.a8);
@@ -253,12 +285,7 @@ pub fn new_all(input: &AllInput<'_>) -> Vec<u8> {
     ob.set_text(&mut b, ALL_NAME, input.name);
     ob.set_bytes(&mut b, ALL_BLOB, input.blob);
     ob.set_bytes_fixed(&mut b, ALL_ID, input.id);
-    let mut list_items = b.start_list();
-    for elem in input.items {
-        list_items.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, ALL_ITEMS, list_items.finish_offset(), input.items.len());
-    let at_inner = b.embed(input.inner);
+    ob.set_list(&mut b, ALL_ITEMS, at_items, input.items.len());
     ob.set_object(&mut b, ALL_INNER, at_inner);
     ob.finish_as_root(&mut b);
     b.finish()

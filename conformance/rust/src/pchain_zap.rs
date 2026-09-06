@@ -64,20 +64,20 @@ impl<'a> Spend<'a> {
             .unwrap_or(&[0u8; 32])
     }
 
-    pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(SPEND_OUTS)
+    pub fn outs(&self) -> OutList<'a> {
+        OutList { l: self.o.list_stride(SPEND_OUTS, OUT_SIZE) }
     }
 
-    pub fn owner_addrs(&self) -> zap::List<'a> {
-        self.o.list(SPEND_OWNER_ADDRS)
+    pub fn owner_addrs(&self) -> AddrList<'a> {
+        AddrList { l: self.o.list_stride(SPEND_OWNER_ADDRS, ADDR_SIZE) }
     }
 
-    pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(SPEND_INS)
+    pub fn ins(&self) -> InList<'a> {
+        InList { l: self.o.list_stride(SPEND_INS, IN_SIZE) }
     }
 
-    pub fn sig_indices(&self) -> zap::List<'a> {
-        self.o.list(SPEND_SIG_INDICES)
+    pub fn sig_indices(&self) -> SigList<'a> {
+        SigList { l: self.o.list_stride(SPEND_SIG_INDICES, SIG_SIZE) }
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -115,31 +115,59 @@ impl<'a> Default for SpendInput<'a> {
 
 /// Write a Spend message and answer its bytes.
 pub fn new_spend(input: &SpendInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_outs = 0;
+    if !input.outs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.outs {
+            let mut rec = [0u8; OUT_SIZE];
+            let n = elem.len().min(OUT_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_outs = lb.finish_offset();
+    }
+    let mut at_owner_addrs = 0;
+    if !input.owner_addrs.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.owner_addrs {
+            let mut rec = [0u8; ADDR_SIZE];
+            let n = elem.len().min(ADDR_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_owner_addrs = lb.finish_offset();
+    }
+    let mut at_ins = 0;
+    if !input.ins.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.ins {
+            let mut rec = [0u8; IN_SIZE];
+            let n = elem.len().min(IN_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_ins = lb.finish_offset();
+    }
+    let mut at_sig_indices = 0;
+    if !input.sig_indices.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.sig_indices {
+            let mut rec = [0u8; SIG_SIZE];
+            let n = elem.len().min(SIG_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_sig_indices = lb.finish_offset();
+    }
     let mut ob = b.start_object(SPEND_SIZE);
     ob.set_u8(&mut b, SPEND_KIND, input.kind);
     ob.set_u32(&mut b, SPEND_NETWORK_ID, input.network_id);
     ob.set_bytes_fixed(&mut b, SPEND_BLOCKCHAIN_ID, input.blockchain_id);
-    let mut list_outs = b.start_list();
-    for elem in input.outs {
-        list_outs.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, SPEND_OUTS, list_outs.finish_offset(), input.outs.len());
-    let mut list_owner_addrs = b.start_list();
-    for elem in input.owner_addrs {
-        list_owner_addrs.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, SPEND_OWNER_ADDRS, list_owner_addrs.finish_offset(), input.owner_addrs.len());
-    let mut list_ins = b.start_list();
-    for elem in input.ins {
-        list_ins.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, SPEND_INS, list_ins.finish_offset(), input.ins.len());
-    let mut list_sig_indices = b.start_list();
-    for elem in input.sig_indices {
-        list_sig_indices.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, SPEND_SIG_INDICES, list_sig_indices.finish_offset(), input.sig_indices.len());
+    ob.set_list(&mut b, SPEND_OUTS, at_outs, input.outs.len());
+    ob.set_list(&mut b, SPEND_OWNER_ADDRS, at_owner_addrs, input.owner_addrs.len());
+    ob.set_list(&mut b, SPEND_INS, at_ins, input.ins.len());
+    ob.set_list(&mut b, SPEND_SIG_INDICES, at_sig_indices, input.sig_indices.len());
     ob.set_bytes(&mut b, SPEND_MEMO, input.memo);
     ob.finish_as_root(&mut b);
     b.finish()
@@ -221,6 +249,34 @@ impl<'a> Out<'a> {
             .try_into()
             .unwrap_or(&[0u8; 4])
     }
+
+    /// The OUT_SIZE bytes this Out occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, OUT_SIZE)
+    }
+}
+
+/// A run of Out records, OUT_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct OutList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> OutList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent Out past the end.
+    pub fn at(&self, i: usize) -> Out<'a> {
+        Out::new(self.l.object(i, OUT_SIZE))
+    }
 }
 
 /// The field values [`new_out`] writes.
@@ -253,7 +309,7 @@ impl<'a> Default for OutInput<'a> {
 
 /// Write a Out message and answer its bytes.
 pub fn new_out(input: &OutInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(OUT_SIZE);
     ob.set_bytes_fixed(&mut b, OUT_ASSET, input.asset);
     ob.set_u64(&mut b, OUT_STAKE_LOCK, input.stake_lock);
@@ -347,6 +403,34 @@ impl<'a> In<'a> {
             .try_into()
             .unwrap_or(&[0u8; 4])
     }
+
+    /// The IN_SIZE bytes this In occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, IN_SIZE)
+    }
+}
+
+/// A run of In records, IN_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct InList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> InList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent In past the end.
+    pub fn at(&self, i: usize) -> In<'a> {
+        In::new(self.l.object(i, IN_SIZE))
+    }
 }
 
 /// The field values [`new_in`] writes.
@@ -379,7 +463,7 @@ impl<'a> Default for InInput<'a> {
 
 /// Write a In message and answer its bytes.
 pub fn new_in(input: &InInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(IN_SIZE);
     ob.set_bytes_fixed(&mut b, IN_TX_ID, input.tx_id);
     ob.set_u32(&mut b, IN_OUTPUT_INDEX, input.output_index);
@@ -430,6 +514,34 @@ impl<'a> Addr<'a> {
             .try_into()
             .unwrap_or(&[0u8; 20])
     }
+
+    /// The ADDR_SIZE bytes this Addr occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, ADDR_SIZE)
+    }
+}
+
+/// A run of Addr records, ADDR_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct AddrList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> AddrList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent Addr past the end.
+    pub fn at(&self, i: usize) -> Addr<'a> {
+        Addr::new(self.l.object(i, ADDR_SIZE))
+    }
 }
 
 /// The field values [`new_addr`] writes.
@@ -448,7 +560,7 @@ impl<'a> Default for AddrInput<'a> {
 
 /// Write a Addr message and answer its bytes.
 pub fn new_addr(input: &AddrInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(ADDR_SIZE);
     ob.set_bytes_fixed(&mut b, ADDR_BYTES, input.bytes);
     ob.finish_as_root(&mut b);
@@ -488,6 +600,34 @@ impl<'a> Sig<'a> {
     pub fn index(&self) -> u32 {
         self.o.u32(SIG_INDEX)
     }
+
+    /// The SIG_SIZE bytes this Sig occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, SIG_SIZE)
+    }
+}
+
+/// A run of Sig records, SIG_SIZE bytes each.
+#[derive(Clone, Copy, Debug)]
+pub struct SigList<'a> {
+    l: zap::List<'a>,
+}
+
+impl<'a> SigList<'a> {
+    /// How many elements the list holds.
+    pub fn len(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Whether the list holds none.
+    pub fn is_empty(&self) -> bool {
+        self.l.len() == 0
+    }
+
+    /// Element `i`, or the absent Sig past the end.
+    pub fn at(&self, i: usize) -> Sig<'a> {
+        Sig::new(self.l.object(i, SIG_SIZE))
+    }
 }
 
 /// The field values [`new_sig`] writes.
@@ -506,7 +646,7 @@ impl Default for SigInput {
 
 /// Write a Sig message and answer its bytes.
 pub fn new_sig(input: &SigInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(SIG_SIZE);
     ob.set_u32(&mut b, SIG_INDEX, input.index);
     ob.finish_as_root(&mut b);
@@ -569,8 +709,8 @@ impl<'a> Block<'a> {
         self.o.u64(BLOCK_TIME)
     }
 
-    pub fn tx_lengths(&self) -> zap::List<'a> {
-        self.o.list(BLOCK_TX_LENGTHS)
+    pub fn tx_lengths(&self) -> SigList<'a> {
+        SigList { l: self.o.list_stride(BLOCK_TX_LENGTHS, SIG_SIZE) }
     }
 
     pub fn tx_blob(&self) -> &'a [u8] {
@@ -610,17 +750,24 @@ impl<'a> Default for BlockInput<'a> {
 
 /// Write a Block message and answer its bytes.
 pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
+    let mut at_tx_lengths = 0;
+    if !input.tx_lengths.is_empty() {
+        let mut lb = b.start_list();
+        for elem in input.tx_lengths {
+            let mut rec = [0u8; SIG_SIZE];
+            let n = elem.len().min(SIG_SIZE);
+            rec[..n].copy_from_slice(&elem[..n]);
+            lb.add_bytes(&mut b, &rec);
+        }
+        at_tx_lengths = lb.finish_offset();
+    }
     let mut ob = b.start_object(BLOCK_SIZE);
     ob.set_u8(&mut b, BLOCK_KIND, input.kind);
     ob.set_bytes_fixed(&mut b, BLOCK_PARENT, input.parent);
     ob.set_u64(&mut b, BLOCK_HEIGHT, input.height);
     ob.set_u64(&mut b, BLOCK_TIME, input.time);
-    let mut list_tx_lengths = b.start_list();
-    for elem in input.tx_lengths {
-        list_tx_lengths.add_object_bytes(&mut b, elem);
-    }
-    ob.set_list(&mut b, BLOCK_TX_LENGTHS, list_tx_lengths.finish_offset(), input.tx_lengths.len());
+    ob.set_list(&mut b, BLOCK_TX_LENGTHS, at_tx_lengths, input.tx_lengths.len());
     ob.set_bytes(&mut b, BLOCK_TX_BLOB, input.tx_blob);
     ob.set_bytes(&mut b, BLOCK_PROPOSAL_TX, input.proposal_tx);
     ob.finish_as_root(&mut b);

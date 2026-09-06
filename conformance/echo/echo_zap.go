@@ -36,7 +36,7 @@ type PingInput struct {
 
 // NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
 func NewPing(in PingInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(pingSize)
 	ob.SetUint64(pingSeqOff, in.Seq)
 	ob.FinishAsRoot()
@@ -70,7 +70,7 @@ type PongInput struct {
 
 // NewPong builds a ZAP-encoded Pong message from in and returns the bytes.
 func NewPong(in PongInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(pongSize)
 	ob.SetUint64(pongSeqOff, in.Seq)
 	ob.FinishAsRoot()

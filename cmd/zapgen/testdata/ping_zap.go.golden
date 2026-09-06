@@ -27,6 +27,9 @@ func WrapPing(b []byte) (Ping, error) {
 
 func (t Ping) Seq() uint64 { return t.o.Uint64(pingSeqOff) }
 
+// Record is the pingSize bytes this Ping occupies where it lies.
+func (t Ping) Record() []byte { return t.o.BytesFixed(0, pingSize) }
+
 // PingInput collects the field values for NewPing.
 type PingInput struct {
 	Seq uint64
@@ -34,7 +37,7 @@ type PingInput struct {
 
 // NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
 func NewPing(in PingInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(pingSize)
 	ob.SetUint64(pingSeqOff, in.Seq)
 	ob.FinishAsRoot()

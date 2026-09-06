@@ -39,11 +39,13 @@ func (t Spend) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(spendBlockchainIDOff, 32))
 	return out
 }
-func (t Spend) Outs() zap.List       { return t.o.List(spendOutsOff) }
-func (t Spend) OwnerAddrs() zap.List { return t.o.List(spendOwnerAddrsOff) }
-func (t Spend) Ins() zap.List        { return t.o.List(spendInsOff) }
-func (t Spend) SigIndices() zap.List { return t.o.List(spendSigIndicesOff) }
-func (t Spend) Memo() []byte         { return t.o.Bytes(spendMemoOff) }
+func (t Spend) Outs() OutList { return OutList{l: t.o.ListStride(spendOutsOff, outSize)} }
+func (t Spend) OwnerAddrs() AddrList {
+	return AddrList{l: t.o.ListStride(spendOwnerAddrsOff, addrSize)}
+}
+func (t Spend) Ins() InList         { return InList{l: t.o.ListStride(spendInsOff, inSize)} }
+func (t Spend) SigIndices() SigList { return SigList{l: t.o.ListStride(spendSigIndicesOff, sigSize)} }
+func (t Spend) Memo() []byte        { return t.o.Bytes(spendMemoOff) }
 
 // SpendInput collects the field values for NewSpend.
 type SpendInput struct {
@@ -59,31 +61,55 @@ type SpendInput struct {
 
 // NewSpend builds a ZAP-encoded Spend message from in and returns the bytes.
 func NewSpend(in SpendInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	outsAt := 0
+	if len(in.Outs) > 0 {
+		lb := b.StartList(outSize)
+		for _, elem := range in.Outs {
+			var rec [outSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		outsAt = lb.FinishOffset()
+	}
+	ownerAddrsAt := 0
+	if len(in.OwnerAddrs) > 0 {
+		lb := b.StartList(addrSize)
+		for _, elem := range in.OwnerAddrs {
+			var rec [addrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		ownerAddrsAt = lb.FinishOffset()
+	}
+	insAt := 0
+	if len(in.Ins) > 0 {
+		lb := b.StartList(inSize)
+		for _, elem := range in.Ins {
+			var rec [inSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		insAt = lb.FinishOffset()
+	}
+	sigIndicesAt := 0
+	if len(in.SigIndices) > 0 {
+		lb := b.StartList(sigSize)
+		for _, elem := range in.SigIndices {
+			var rec [sigSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		sigIndicesAt = lb.FinishOffset()
+	}
 	ob := b.StartObject(spendSize)
 	ob.SetUint8(spendKindOff, in.Kind)
 	ob.SetUint32(spendNetworkIDOff, in.NetworkID)
 	ob.SetBytesFixed(spendBlockchainIDOff, in.BlockchainID[:])
-	outsLB := b.StartList(0)
-	for _, elem := range in.Outs {
-		outsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(spendOutsOff, outsLB.FinishOffset(), len(in.Outs))
-	ownerAddrsLB := b.StartList(0)
-	for _, elem := range in.OwnerAddrs {
-		ownerAddrsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(spendOwnerAddrsOff, ownerAddrsLB.FinishOffset(), len(in.OwnerAddrs))
-	insLB := b.StartList(0)
-	for _, elem := range in.Ins {
-		insLB.AddObjectBytes(elem)
-	}
-	ob.SetList(spendInsOff, insLB.FinishOffset(), len(in.Ins))
-	sigIndicesLB := b.StartList(0)
-	for _, elem := range in.SigIndices {
-		sigIndicesLB.AddObjectBytes(elem)
-	}
-	ob.SetList(spendSigIndicesOff, sigIndicesLB.FinishOffset(), len(in.SigIndices))
+	ob.SetList(spendOutsOff, outsAt, len(in.Outs))
+	ob.SetList(spendOwnerAddrsOff, ownerAddrsAt, len(in.OwnerAddrs))
+	ob.SetList(spendInsOff, insAt, len(in.Ins))
+	ob.SetList(spendSigIndicesOff, sigIndicesAt, len(in.SigIndices))
 	ob.SetBytes(spendMemoOff, in.Memo)
 	ob.FinishAsRoot()
 	return b.Finish()
@@ -131,6 +157,18 @@ func (t Out) Pad() [4]byte {
 	return out
 }
 
+// Record is the outSize bytes this Out occupies where it lies.
+func (t Out) Record() []byte { return t.o.BytesFixed(0, outSize) }
+
+// OutList is a run of Out records, outSize bytes each.
+type OutList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x OutList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent Out past the end.
+func (x OutList) At(i int) Out { return Out{o: x.l.Object(i, outSize)} }
+
 // OutInput collects the field values for NewOut.
 type OutInput struct {
 	Asset     [32]byte
@@ -145,7 +183,7 @@ type OutInput struct {
 
 // NewOut builds a ZAP-encoded Out message from in and returns the bytes.
 func NewOut(in OutInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(outSize)
 	ob.SetBytesFixed(outAssetOff, in.Asset[:])
 	ob.SetUint64(outStakeLockOff, in.StakeLock)
@@ -205,6 +243,18 @@ func (t In) Pad() [4]byte {
 	return out
 }
 
+// Record is the inSize bytes this In occupies where it lies.
+func (t In) Record() []byte { return t.o.BytesFixed(0, inSize) }
+
+// InList is a run of In records, inSize bytes each.
+type InList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x InList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent In past the end.
+func (x InList) At(i int) In { return In{o: x.l.Object(i, inSize)} }
+
 // InInput collects the field values for NewIn.
 type InInput struct {
 	TxID        [32]byte
@@ -219,7 +269,7 @@ type InInput struct {
 
 // NewIn builds a ZAP-encoded In message from in and returns the bytes.
 func NewIn(in InInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(inSize)
 	ob.SetBytesFixed(inTxIDOff, in.TxID[:])
 	ob.SetUint32(inOutputIndexOff, in.OutputIndex)
@@ -257,6 +307,18 @@ func (t Addr) Bytes() [20]byte {
 	return out
 }
 
+// Record is the addrSize bytes this Addr occupies where it lies.
+func (t Addr) Record() []byte { return t.o.BytesFixed(0, addrSize) }
+
+// AddrList is a run of Addr records, addrSize bytes each.
+type AddrList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x AddrList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent Addr past the end.
+func (x AddrList) At(i int) Addr { return Addr{o: x.l.Object(i, addrSize)} }
+
 // AddrInput collects the field values for NewAddr.
 type AddrInput struct {
 	Bytes [20]byte
@@ -264,7 +326,7 @@ type AddrInput struct {
 
 // NewAddr builds a ZAP-encoded Addr message from in and returns the bytes.
 func NewAddr(in AddrInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(addrSize)
 	ob.SetBytesFixed(addrBytesOff, in.Bytes[:])
 	ob.FinishAsRoot()
@@ -291,6 +353,18 @@ func WrapSig(b []byte) (Sig, error) {
 
 func (t Sig) Index() uint32 { return t.o.Uint32(sigIndexOff) }
 
+// Record is the sigSize bytes this Sig occupies where it lies.
+func (t Sig) Record() []byte { return t.o.BytesFixed(0, sigSize) }
+
+// SigList is a run of Sig records, sigSize bytes each.
+type SigList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x SigList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent Sig past the end.
+func (x SigList) At(i int) Sig { return Sig{o: x.l.Object(i, sigSize)} }
+
 // SigInput collects the field values for NewSig.
 type SigInput struct {
 	Index uint32
@@ -298,7 +372,7 @@ type SigInput struct {
 
 // NewSig builds a ZAP-encoded Sig message from in and returns the bytes.
 func NewSig(in SigInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(sigSize)
 	ob.SetUint32(sigIndexOff, in.Index)
 	ob.FinishAsRoot()
@@ -335,11 +409,11 @@ func (t Block) Parent() [32]byte {
 	copy(out[:], t.o.BytesFixed(blockParentOff, 32))
 	return out
 }
-func (t Block) Height() uint64      { return t.o.Uint64(blockHeightOff) }
-func (t Block) Time() uint64        { return t.o.Uint64(blockTimeOff) }
-func (t Block) TxLengths() zap.List { return t.o.List(blockTxLengthsOff) }
-func (t Block) TxBlob() []byte      { return t.o.Bytes(blockTxBlobOff) }
-func (t Block) ProposalTx() []byte  { return t.o.Bytes(blockProposalTxOff) }
+func (t Block) Height() uint64     { return t.o.Uint64(blockHeightOff) }
+func (t Block) Time() uint64       { return t.o.Uint64(blockTimeOff) }
+func (t Block) TxLengths() SigList { return SigList{l: t.o.ListStride(blockTxLengthsOff, sigSize)} }
+func (t Block) TxBlob() []byte     { return t.o.Bytes(blockTxBlobOff) }
+func (t Block) ProposalTx() []byte { return t.o.Bytes(blockProposalTxOff) }
 
 // BlockInput collects the field values for NewBlock.
 type BlockInput struct {
@@ -354,17 +428,23 @@ type BlockInput struct {
 
 // NewBlock builds a ZAP-encoded Block message from in and returns the bytes.
 func NewBlock(in BlockInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	txLengthsAt := 0
+	if len(in.TxLengths) > 0 {
+		lb := b.StartList(sigSize)
+		for _, elem := range in.TxLengths {
+			var rec [sigSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		txLengthsAt = lb.FinishOffset()
+	}
 	ob := b.StartObject(blockSize)
 	ob.SetUint8(blockKindOff, in.Kind)
 	ob.SetBytesFixed(blockParentOff, in.Parent[:])
 	ob.SetUint64(blockHeightOff, in.Height)
 	ob.SetUint64(blockTimeOff, in.Time)
-	txLengthsLB := b.StartList(0)
-	for _, elem := range in.TxLengths {
-		txLengthsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(blockTxLengthsOff, txLengthsLB.FinishOffset(), len(in.TxLengths))
+	ob.SetList(blockTxLengthsOff, txLengthsAt, len(in.TxLengths))
 	ob.SetBytes(blockTxBlobOff, in.TxBlob)
 	ob.SetBytes(blockProposalTxOff, in.ProposalTx)
 	ob.FinishAsRoot()

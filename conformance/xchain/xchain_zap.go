@@ -40,7 +40,7 @@ type SignedInput struct {
 
 // NewSigned builds a ZAP-encoded Signed message from in and returns the bytes.
 func NewSigned(in SignedInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(signedSize)
 	ob.SetBytes(signedUnsignedOff, in.Unsigned)
 	ob.SetUint32(signedCredentialCountOff, in.CredentialCount)
@@ -77,9 +77,9 @@ func (t Base) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(baseBlockchainIDOff, 32))
 	return out
 }
-func (t Base) Outs() zap.List { return t.o.List(baseOutsOff) }
-func (t Base) Ins() zap.List  { return t.o.List(baseInsOff) }
-func (t Base) Memo() []byte   { return t.o.Bytes(baseMemoOff) }
+func (t Base) Outs() PtrList { return PtrList{l: t.o.ListStride(baseOutsOff, ptrSize)} }
+func (t Base) Ins() PtrList  { return PtrList{l: t.o.ListStride(baseInsOff, ptrSize)} }
+func (t Base) Memo() []byte  { return t.o.Bytes(baseMemoOff) }
 
 // BaseInput collects the field values for NewBase.
 type BaseInput struct {
@@ -92,20 +92,32 @@ type BaseInput struct {
 
 // NewBase builds a ZAP-encoded Base message from in and returns the bytes.
 func NewBase(in BaseInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	outsAt := 0
+	if len(in.Outs) > 0 {
+		lb := b.StartList(ptrSize)
+		for _, elem := range in.Outs {
+			var rec [ptrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		outsAt = lb.FinishOffset()
+	}
+	insAt := 0
+	if len(in.Ins) > 0 {
+		lb := b.StartList(ptrSize)
+		for _, elem := range in.Ins {
+			var rec [ptrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		insAt = lb.FinishOffset()
+	}
 	ob := b.StartObject(baseSize)
 	ob.SetUint32(baseNetworkIDOff, in.NetworkID)
 	ob.SetBytesFixed(baseBlockchainIDOff, in.BlockchainID[:])
-	outsLB := b.StartList(0)
-	for _, elem := range in.Outs {
-		outsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseOutsOff, outsLB.FinishOffset(), len(in.Outs))
-	insLB := b.StartList(0)
-	for _, elem := range in.Ins {
-		insLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseInsOff, insLB.FinishOffset(), len(in.Ins))
+	ob.SetList(baseOutsOff, outsAt, len(in.Outs))
+	ob.SetList(baseInsOff, insAt, len(in.Ins))
 	ob.SetBytes(baseMemoOff, in.Memo)
 	ob.FinishAsRoot()
 	return b.Finish()
@@ -131,6 +143,18 @@ func WrapPtr(b []byte) (Ptr, error) {
 
 func (t Ptr) Offset() uint32 { return t.o.Uint32(ptrOffsetOff) }
 
+// Record is the ptrSize bytes this Ptr occupies where it lies.
+func (t Ptr) Record() []byte { return t.o.BytesFixed(0, ptrSize) }
+
+// PtrList is a run of Ptr records, ptrSize bytes each.
+type PtrList struct{ l zap.List }
+
+// Len is how many elements the list holds.
+func (x PtrList) Len() int { return x.l.Len() }
+
+// At is element i, or the absent Ptr past the end.
+func (x PtrList) At(i int) Ptr { return Ptr{o: x.l.Object(i, ptrSize)} }
+
 // PtrInput collects the field values for NewPtr.
 type PtrInput struct {
 	Offset uint32
@@ -138,7 +162,7 @@ type PtrInput struct {
 
 // NewPtr builds a ZAP-encoded Ptr message from in and returns the bytes.
 func NewPtr(in PtrInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
 	ob := b.StartObject(ptrSize)
 	ob.SetUint32(ptrOffsetOff, in.Offset)
 	ob.FinishAsRoot()
@@ -180,8 +204,8 @@ func (t Block) Root() [32]byte {
 	copy(out[:], t.o.BytesFixed(blockRootOff, 32))
 	return out
 }
-func (t Block) TxLengths() zap.List { return t.o.List(blockTxLengthsOff) }
-func (t Block) TxBlob() []byte      { return t.o.Bytes(blockTxBlobOff) }
+func (t Block) TxLengths() PtrList { return PtrList{l: t.o.ListStride(blockTxLengthsOff, ptrSize)} }
+func (t Block) TxBlob() []byte     { return t.o.Bytes(blockTxBlobOff) }
 
 // BlockInput collects the field values for NewBlock.
 type BlockInput struct {
@@ -195,17 +219,23 @@ type BlockInput struct {
 
 // NewBlock builds a ZAP-encoded Block message from in and returns the bytes.
 func NewBlock(in BlockInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	txLengthsAt := 0
+	if len(in.TxLengths) > 0 {
+		lb := b.StartList(ptrSize)
+		for _, elem := range in.TxLengths {
+			var rec [ptrSize]byte
+			copy(rec[:], elem)
+			lb.AddBytes(rec[:])
+		}
+		txLengthsAt = lb.FinishOffset()
+	}
 	ob := b.StartObject(blockSize)
 	ob.SetBytesFixed(blockParentOff, in.Parent[:])
 	ob.SetUint64(blockHeightOff, in.Height)
 	ob.SetUint64(blockTimeOff, in.Time)
 	ob.SetBytesFixed(blockRootOff, in.Root[:])
-	txLengthsLB := b.StartList(0)
-	for _, elem := range in.TxLengths {
-		txLengthsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(blockTxLengthsOff, txLengthsLB.FinishOffset(), len(in.TxLengths))
+	ob.SetList(blockTxLengthsOff, txLengthsAt, len(in.TxLengths))
 	ob.SetBytes(blockTxBlobOff, in.TxBlob)
 	ob.FinishAsRoot()
 	return b.Finish()

@@ -384,6 +384,27 @@ func (o Object) List(fieldOffset int) List {
 	return List{msg: o.msg, offset: absOffset, length: int(length)}
 }
 
+// ListStride reads a list whose elements are stride bytes wide.
+//
+// List() cannot do better than "the count is no larger than the message",
+// because the wire carries a start and a count and nothing about how wide an
+// element is. A caller generated from a schema DOES know the width, and the
+// tight bound is the one worth checking: a count that cannot fit stride bytes
+// per element in what is left of the message is refused once, here, rather
+// than surviving to be the trip count of every loop over it.
+//
+// A stride of 0 means "not stated", and answers exactly List().
+func (o Object) ListStride(fieldOffset, stride int) List {
+	l := o.List(fieldOffset)
+	if stride <= 0 || l.msg == nil {
+		return l
+	}
+	if l.length > (len(o.buf())-l.offset)/stride {
+		return List{}
+	}
+	return l
+}
+
 // List is a zero-copy view into a ZAP list.
 type List struct {
 	msg    *Message

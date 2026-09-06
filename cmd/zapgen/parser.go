@@ -199,6 +199,12 @@ func (p *parser) parseFile() (*File, error) {
 			return nil, p.errf("expected `struct`, `interface`, or `type` at top level")
 		}
 	}
+	// The shape of every list is decided here, once, so that a backend reads
+	// the answer instead of working it out — three answers to one question is
+	// how three wires start.
+	if err := Resolve(p.file); err != nil {
+		return nil, fmt.Errorf("%s: %w", p.filename, err)
+	}
 	return p.file, nil
 }
 

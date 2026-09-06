@@ -12,3 +12,14 @@ struct BaseTx {
     Ins          list<TransferableInput>   @44
     Memo         bytes                     @52
 }
+
+# What one entry of those lists is. The X wire holds its outputs and inputs
+# as a run of relative offsets into the same buffer, four bytes each; a list
+# element has to be declared to have a width at all.
+struct TransferableOutput {
+    Offset u32 @0
+}
+
+struct TransferableInput {
+    Offset u32 @0
+}

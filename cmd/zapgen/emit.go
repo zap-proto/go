@@ -69,6 +69,7 @@ func EmitSingle(f *File) (string, []byte, error) {
 		}
 		emitOffsets(&w, s)
 		emitReader(&w, s)
+		emitList(&w, f, s)
 		emitBuilder(&w, s)
 		w.WriteString("\n")
 	}
@@ -132,6 +133,7 @@ func emitStruct(f *File, s *Struct) ([]byte, error) {
 	writeFileHeader(&w, f.Package, sourceName(f), true, false)
 	emitOffsets(&w, s)
 	emitReader(&w, s)
+	emitList(&w, f, s)
 	emitBuilder(&w, s)
 	return w.Bytes(), nil
 }
@@ -244,6 +246,12 @@ func emitReader(w *bytes.Buffer, s *Struct) {
 	for _, f := range s.Fields {
 		emitFieldReader(w, s.Name, lower, f)
 	}
+	if inline(s) {
+		// A record is entirely its own bytes, so it can answer them: what a
+		// list element holds, and what writing one back needs.
+		fmt.Fprintf(w, "\n// Record is the %sSize bytes this %s occupies where it lies.\n", lower, s.Name)
+		fmt.Fprintf(w, "func (t %s) Record() []byte { return t.o.BytesFixed(0, %sSize) }\n", s.Name, lower)
+	}
 }
 
 func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
@@ -282,7 +290,17 @@ func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
 		w.WriteString("\treturn out\n")
 		w.WriteString("}\n")
 	case KindList:
-		fmt.Fprintf(w, "func (t %s) %s() zap.List { return t.o.List(%s) }\n", structName, f.Name, offsetConst)
+		elem := f.Type.ListElem
+		if elem.Kind == KindStruct {
+			// A typed element accessor: the list answers its own element
+			// type, so no caller is told again how wide a record is.
+			fmt.Fprintf(w, "func (t %s) %s() %sList { return %sList{l: %s} }\n",
+				structName, f.Name, elem.StructName, elem.StructName,
+				goListRead(offsetConst, f.Type))
+			return
+		}
+		fmt.Fprintf(w, "func (t %s) %s() zap.List { return %s }\n",
+			structName, f.Name, goListRead(offsetConst, f.Type))
 	case KindStruct:
 		fmt.Fprintf(w, "func (t %s) %s() %s { return %s{o: t.o.Object(%s)} }\n",
 			structName, f.Name, f.Type.StructName, f.Type.StructName, offsetConst)
@@ -301,12 +319,15 @@ func emitBuilder(w *bytes.Buffer, s *Struct) {
 	// Constructor.
 	fmt.Fprintf(w, "// New%s builds a ZAP-encoded %s message from in and returns the bytes.\n", s.Name, s.Name)
 	fmt.Fprintf(w, "func New%s(in %sInput) []byte {\n", s.Name, s.Name)
-	w.WriteString("\tb := zap.NewBuilder(256)\n")
+	w.WriteString("\tb := zap.NewBuilderV2(256)\n")
 	lower := lowerFirst(s.Name)
-	fmt.Fprintf(w, "\tob := b.StartObject(%sSize)\n", lower)
 
-	// Two-pass: fixed-section first, then variable-tail (lists last so we
-	// don't interleave list-element writes with deferred-bytes writes).
+	// What a pointer will name goes down first, in field order; the object
+	// last. That is the order the P, X and Q wires are already written in.
+	for _, f := range s.Fields {
+		emitTail(w, f)
+	}
+	fmt.Fprintf(w, "\tob := b.StartObject(%sSize)\n", lower)
 	for _, f := range s.Fields {
 		emitFieldWriter(w, lower, f)
 	}
@@ -389,18 +410,77 @@ func emitFieldWriter(w *bytes.Buffer, lower string, f *Field) {
 	case KindBytesFixed:
 		fmt.Fprintf(w, "\tob.SetBytesFixed(%s, in.%s[:])\n", offsetConst, f.Name)
 	case KindList:
-		listVar := lowerFirst(f.Name) + "LB"
-		fmt.Fprintf(w, "\t%s := b.StartList(0)\n", listVar)
-		fmt.Fprintf(w, "\tfor _, elem := range in.%s {\n", f.Name)
-		fmt.Fprintf(w, "\t\t%s.AddObjectBytes(elem)\n", listVar)
-		w.WriteString("\t}\n")
-		fmt.Fprintf(w, "\tob.SetList(%s, %s.FinishOffset(), len(in.%s))\n",
-			offsetConst, listVar, f.Name)
+		fmt.Fprintf(w, "\tob.SetList(%s, %s, len(in.%s))\n", offsetConst, goAt(f), f.Name)
 	case KindStruct:
-		// Nested struct: the caller passes a message it built already. Embed
-		// copies it and answers where its ROOT lands — a pointer to the head
-		// of the copy would name the copy's header, not its first field.
-		fmt.Fprintf(w, "\tob.SetObject(%s, b.Embed(in.%s))\n", offsetConst, f.Name)
+		fmt.Fprintf(w, "\tob.SetObject(%s, %s)\n", offsetConst, goAt(f))
+	}
+}
+
+// goListRead is the read a list field answers: the tight one when the schema
+// states how wide an element is, the plain one when it does not.
+func goListRead(offsetConst string, t Type) string {
+	if t.Stride > 0 {
+		return fmt.Sprintf("t.o.ListStride(%s, %s)", offsetConst, goStride(t))
+	}
+	return fmt.Sprintf("t.o.List(%s)", offsetConst)
+}
+
+// goStride is how the width of one element is spelled: the element struct's
+// own Size, so the number lives in one place, or the literal width of a value
+// that has no struct to hold it.
+func goStride(t Type) string {
+	if t.ListElem.Kind == KindStruct {
+		return lowerFirst(t.ListElem.StructName) + "Size"
+	}
+	return fmt.Sprint(t.Stride)
+}
+
+// goStrideOrZero is goStride, or "0" for a list whose elements have no width
+// the schema states.
+func goStrideOrZero(t Type) string {
+	if t.Stride == 0 {
+		return "0"
+	}
+	return goStride(t)
+}
+
+// goAt names the local holding where a field's pointer target landed.
+func goAt(f *Field) string { return lowerFirst(f.Name) + "At" }
+
+// emitTail writes what a pointer field will name, ahead of the object that
+// names it.
+//
+// The chains write this way: a list is laid down, then the object, so the
+// object's pointer leads BACKWARD into bytes already written. Writing the
+// object first and its lists after reads the same — pointers are signed —
+// but it is not the same bytes, and the same bytes is the point.
+func emitTail(w *bytes.Buffer, f *Field) {
+	at := goAt(f)
+	switch f.Type.Kind {
+	case KindList:
+		fmt.Fprintf(w, "\t%s := 0\n", at)
+		fmt.Fprintf(w, "\tif len(in.%s) > 0 {\n", f.Name)
+		fmt.Fprintf(w, "\t\tlb := b.StartList(%s)\n", goStrideOrZero(f.Type))
+		fmt.Fprintf(w, "\t\tfor _, elem := range in.%s {\n", f.Name)
+		if f.Type.Stride > 0 {
+			// A record is exactly as wide as the schema says, whatever the
+			// caller handed over: short is zero-filled, long is cut. A list
+			// whose elements were each a different width is not a list.
+			fmt.Fprintf(w, "\t\t\tvar rec [%s]byte\n", goStride(f.Type))
+			w.WriteString("\t\t\tcopy(rec[:], elem)\n")
+			w.WriteString("\t\t\tlb.AddBytes(rec[:])\n")
+		} else {
+			w.WriteString("\t\t\tlb.AddObjectBytes(elem)\n")
+		}
+		w.WriteString("\t\t}\n")
+		fmt.Fprintf(w, "\t\t%s = lb.FinishOffset()\n", at)
+		w.WriteString("\t}\n")
+	case KindStruct:
+		// Embed copies the message the caller built and answers where its
+		// ROOT landed. A pointer to the head of the copy would name the
+		// copy's header, and a reader would answer "ZAP" where the first
+		// field belongs.
+		fmt.Fprintf(w, "\t%s := b.Embed(in.%s)\n", at, f.Name)
 	}
 }
 
@@ -645,4 +725,48 @@ func lowerFirst(s string) string {
 		r[0] = r[0] + ('a' - 'A')
 	}
 	return string(r)
+}
+
+// elements names every struct some list in f holds, so a list type is emitted
+// for the structs that are elements and not for the ones that are not.
+func elements(f *File) map[string]bool {
+	held := make(map[string]bool)
+	for _, s := range f.Structs {
+		for _, fd := range s.Fields {
+			if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
+				held[fd.Type.ListElem.StructName] = true
+			}
+		}
+	}
+	return held
+}
+
+// emitList writes the typed list a field of s's element type answers, beside
+// the struct it holds. It is what retires `list.Object(i, SIZE)` from every
+// caller: the width is stated once, here, by the generator that knows it.
+func emitList(w *bytes.Buffer, f *File, s *Struct) {
+	if !elements(f)[s.Name] {
+		return
+	}
+	stride := 0
+	if inline(s) {
+		stride = structSize(s)
+	}
+	lower := lowerFirst(s.Name)
+	if stride > 0 {
+		fmt.Fprintf(w, "\n// %sList is a run of %s records, %sSize bytes each.\n", s.Name, s.Name, lower)
+	} else {
+		fmt.Fprintf(w, "\n// %sList is a run of %s entries, each behind its length.\n", s.Name, s.Name)
+	}
+	fmt.Fprintf(w, "type %sList struct{ l zap.List }\n\n", s.Name)
+	fmt.Fprintf(w, "// Len is how many elements the list holds.\n")
+	fmt.Fprintf(w, "func (x %sList) Len() int { return x.l.Len() }\n\n", s.Name)
+	fmt.Fprintf(w, "// At is element i, or the absent %s past the end.\n", s.Name)
+	if stride > 0 {
+		fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.Object(i, %sSize)} }\n",
+			s.Name, s.Name, s.Name, lower)
+		return
+	}
+	fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.ObjectAt(i)} }\n",
+		s.Name, s.Name, s.Name)
 }

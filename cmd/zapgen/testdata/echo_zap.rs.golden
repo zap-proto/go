@@ -45,6 +45,11 @@ impl<'a> Ping<'a> {
     pub fn seq(&self) -> u64 {
         self.o.u64(PING_SEQ)
     }
+
+    /// The PING_SIZE bytes this Ping occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, PING_SIZE)
+    }
 }
 
 /// The field values [`new_ping`] writes.
@@ -63,7 +68,7 @@ impl Default for PingInput {
 
 /// Write a Ping message and answer its bytes.
 pub fn new_ping(input: &PingInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(PING_SIZE);
     ob.set_u64(&mut b, PING_SEQ, input.seq);
     ob.finish_as_root(&mut b);
@@ -103,6 +108,11 @@ impl<'a> Pong<'a> {
     pub fn seq(&self) -> u64 {
         self.o.u64(PONG_SEQ)
     }
+
+    /// The PONG_SIZE bytes this Pong occupies where it lies.
+    pub fn record(&self) -> &'a [u8] {
+        self.o.bytes_fixed(0, PONG_SIZE)
+    }
 }
 
 /// The field values [`new_pong`] writes.
@@ -121,7 +131,7 @@ impl Default for PongInput {
 
 /// Write a Pong message and answer its bytes.
 pub fn new_pong(input: &PongInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
+    let mut b = zap::Builder::new_v2(256);
     let mut ob = b.start_object(PONG_SIZE);
     ob.set_u64(&mut b, PONG_SEQ, input.seq);
     ob.finish_as_root(&mut b);

@@ -40,12 +40,7 @@ func AllOf(b []byte) string {
 	items := t.Items()
 	fmt.Fprintf(&w, ";items=%d[", items.Len())
 	for i := 0; i < items.Len(); i++ {
-		e, err := WrapLeaf(items.BytesAt(i))
-		if err != nil {
-			fmt.Fprintf(&w, "%d:err;", i)
-			continue
-		}
-		fmt.Fprintf(&w, "%d:%s;", i, leaf(e))
+		fmt.Fprintf(&w, "%d:%s;", i, leaf(items.At(i)))
 	}
 	w.WriteString("]")
 	fmt.Fprintf(&w, ";inner=%s", leaf(t.Inner()))

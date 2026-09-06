@@ -90,10 +90,7 @@ pub fn all_of(b: &[u8]) -> String {
     let items = t.items();
     w.push_str(&format!(";items={}[", items.len()));
     for i in 0..items.len() {
-        match kitchen::Leaf::wrap(items.bytes_at(i)) {
-            Ok(e) => w.push_str(&format!("{i}:{};", leaf(&e))),
-            Err(_) => w.push_str(&format!("{i}:err;")),
-        }
+        w.push_str(&format!("{i}:{};", leaf(&items.at(i))));
     }
     w.push(']');
     w.push_str(&format!(";inner={}", leaf(&t.inner())));
@@ -116,7 +113,7 @@ pub fn spend_of(b: &[u8]) -> Result<String, zap::Error> {
     let outs = t.outs();
     w.push_str(&format!(";outs={}[", outs.len()));
     for i in 0..outs.len() {
-        let o = p::Out::new(outs.object(i, p::OUT_SIZE));
+        let o = outs.at(i);
         w.push_str(&format!(
             "{i}:asset={},slock={},amt={},thr={},olock={},astart={},acount={};",
             hex(o.asset()),
@@ -133,7 +130,7 @@ pub fn spend_of(b: &[u8]) -> Result<String, zap::Error> {
     let addrs = t.owner_addrs();
     w.push_str(&format!(";addrs={}[", addrs.len()));
     for i in 0..addrs.len() {
-        let a = p::Addr::new(addrs.object(i, p::ADDR_SIZE));
+        let a = addrs.at(i);
         w.push_str(&format!("{i}:{};", hex(a.bytes())));
     }
     w.push(']');
@@ -141,7 +138,7 @@ pub fn spend_of(b: &[u8]) -> Result<String, zap::Error> {
     let ins = t.ins();
     w.push_str(&format!(";ins={}[", ins.len()));
     for i in 0..ins.len() {
-        let v = p::In::new(ins.object(i, p::IN_SIZE));
+        let v = ins.at(i);
         w.push_str(&format!(
             "{i}:txid={},idx={},asset={},slock={},amt={},sstart={},scount={};",
             hex(v.tx_id()),
@@ -158,7 +155,7 @@ pub fn spend_of(b: &[u8]) -> Result<String, zap::Error> {
     let sigs = t.sig_indices();
     w.push_str(&format!(";sigs={}[", sigs.len()));
     for i in 0..sigs.len() {
-        let s = p::Sig::new(sigs.object(i, p::SIG_SIZE));
+        let s = sigs.at(i);
         w.push_str(&format!("{i}:{};", s.index()));
     }
     w.push(']');
@@ -180,7 +177,7 @@ pub fn block_of(b: &[u8]) -> Result<String, zap::Error> {
     let lens = t.tx_lengths();
     w.push_str(&format!(";txlens={}[", lens.len()));
     for i in 0..lens.len() {
-        let s = p::Sig::new(lens.object(i, p::SIG_SIZE));
+        let s = lens.at(i);
         w.push_str(&format!("{i}:{};", s.index()));
     }
     w.push(']');
@@ -191,10 +188,10 @@ pub fn block_of(b: &[u8]) -> Result<String, zap::Error> {
 /// every field the builder can carry.
 pub fn rebuild_spend(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
     let t = p::Spend::wrap(b)?;
-    let outs = records(t.outs(), p::OUT_SIZE);
-    let addrs = records(t.owner_addrs(), p::ADDR_SIZE);
-    let ins = records(t.ins(), p::IN_SIZE);
-    let sigs = records(t.sig_indices(), p::SIG_SIZE);
+    let outs = out_records(&t.outs());
+    let addrs = addr_records(&t.owner_addrs());
+    let ins = in_records(&t.ins());
+    let sigs = sig_records(&t.sig_indices());
     Ok(p::new_spend(&p::SpendInput {
         kind: t.kind(),
         network_id: t.network_id(),
@@ -207,13 +204,23 @@ pub fn rebuild_spend(b: &[u8]) -> Result<Vec<u8>, zap::Error> {
     }))
 }
 
-/// Slice a stride list into one byte run per element.
-fn records<'a>(l: zap::List<'a>, stride: usize) -> Vec<&'a [u8]> {
-    let mut out = Vec::with_capacity(l.len());
-    for i in 0..l.len() {
-        out.push(l.object(i, stride).bytes_fixed(0, stride));
-    }
-    out
+// The four record runs, each asking its own list for its own elements. No
+// stride is named here: the element answers its bytes because it knows how
+// wide it is.
+fn out_records<'a>(l: &p::OutList<'a>) -> Vec<&'a [u8]> {
+    (0..l.len()).map(|i| l.at(i).record()).collect()
+}
+
+fn addr_records<'a>(l: &p::AddrList<'a>) -> Vec<&'a [u8]> {
+    (0..l.len()).map(|i| l.at(i).record()).collect()
+}
+
+fn in_records<'a>(l: &p::InList<'a>) -> Vec<&'a [u8]> {
+    (0..l.len()).map(|i| l.at(i).record()).collect()
+}
+
+fn sig_records<'a>(l: &p::SigList<'a>) -> Vec<&'a [u8]> {
+    (0..l.len()).map(|i| l.at(i).record()).collect()
 }
 
 // --- X chain ---------------------------------------------------------------
@@ -251,13 +258,13 @@ pub fn signed_of(b: &[u8]) -> Result<String, zap::Error> {
                     outs.len()
                 ));
                 for i in 0..outs.len() {
-                    let ptr = x::Ptr::new(outs.object(i, x::PTR_SIZE));
+                    let ptr = outs.at(i);
                     w.push_str(&format!("{i}:{};", ptr.offset()));
                 }
                 let ins = base.ins();
                 w.push_str(&format!("];ins={}[", ins.len()));
                 for i in 0..ins.len() {
-                    let ptr = x::Ptr::new(ins.object(i, x::PTR_SIZE));
+                    let ptr = ins.at(i);
                     w.push_str(&format!("{i}:{};", ptr.offset()));
                 }
                 w.push_str("]}");
@@ -296,7 +303,7 @@ pub fn x_block_of(b: &[u8]) -> Result<String, zap::Error> {
     let lens = t.tx_lengths();
     w.push_str(&format!(";txlens={}[", lens.len()));
     for i in 0..lens.len() {
-        let ptr = x::Ptr::new(lens.object(i, x::PTR_SIZE));
+        let ptr = lens.at(i);
         w.push_str(&format!("{i}:{};", ptr.offset()));
     }
     w.push(']');
