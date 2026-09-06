@@ -311,6 +311,34 @@ func (b *Builder) WriteText(s string) int {
 	return b.WriteBytes([]byte(s))
 }
 
+// Embed copies a finished ZAP message into this buffer and returns the
+// offset of its ROOT OBJECT — which is what a nested-struct pointer must
+// name, not where the copy begins.
+//
+// The distinction is the whole point. A finished message opens with a
+// 16-byte header, so a pointer aimed at the start of the copy lands on the
+// magic and a reader answers "ZAP" where the first field should be. Every
+// pointer INSIDE the message is relative to the field that holds it, so the
+// copy needs no rewriting: only the root has to be found, and it is written
+// in the header the copy carries.
+//
+// Answers 0 — the null pointer — for anything that is not a message, so a
+// caller may embed an absent field without asking first.
+func (b *Builder) Embed(msg []byte) int {
+	if len(msg) < HeaderSize {
+		return 0
+	}
+	root := int(binary.LittleEndian.Uint32(msg[8:12]))
+	if root < HeaderSize || root >= len(msg) {
+		return 0
+	}
+	at := b.WriteBytes(msg)
+	if at == 0 {
+		return 0
+	}
+	return at + root
+}
+
 // ListBuilder builds a ZAP list.
 type ListBuilder struct {
 	b        *Builder

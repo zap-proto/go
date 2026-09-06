@@ -397,13 +397,10 @@ func emitFieldWriter(w *bytes.Buffer, lower string, f *Field) {
 		fmt.Fprintf(w, "\tob.SetList(%s, %s.FinishOffset(), len(in.%s))\n",
 			offsetConst, listVar, f.Name)
 	case KindStruct:
-		// Nested struct: caller passes a built sub-buffer; embed it inline.
-		// We allocate via b.StartObject(len(in.X)) and copy the bytes.
-		fmt.Fprintf(w, "\tif len(in.%s) > 0 {\n", f.Name)
-		fmt.Fprintf(w, "\t\tnested := b.StartObject(len(in.%s))\n", f.Name)
-		fmt.Fprintf(w, "\t\tnested.SetBytesFixed(0, in.%s)\n", f.Name)
-		fmt.Fprintf(w, "\t\tob.SetObject(%s, nested.Finish())\n", offsetConst)
-		w.WriteString("\t}\n")
+		// Nested struct: the caller passes a message it built already. Embed
+		// copies it and answers where its ROOT lands — a pointer to the head
+		// of the copy would name the copy's header, not its first field.
+		fmt.Fprintf(w, "\tob.SetObject(%s, b.Embed(in.%s))\n", offsetConst, f.Name)
 	}
 }
 

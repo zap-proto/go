@@ -415,3 +415,47 @@ func TestRefusedPointerReadsZero(t *testing.T) {
 		t.Error("reading through a refused pointer must answer zero")
 	}
 }
+
+// TestEmbedNamesTheRoot — a message copied into another buffer keeps every
+// internal pointer, because they are relative; what has to be found again is
+// its root. A pointer to the head of the copy names the copy's header, and a
+// reader would answer the magic bytes where the first field belongs.
+func TestEmbedNamesTheRoot(t *testing.T) {
+	inner := NewBuilder(64)
+	io := inner.StartObject(8)
+	io.SetUint32(0, 0xcafebabe)
+	io.SetUint32(4, 7)
+	io.FinishAsRoot()
+	sub := inner.Finish()
+
+	outer := NewBuilder(128)
+	oo := outer.StartObject(4)
+	oo.SetObject(0, outer.Embed(sub))
+	oo.FinishAsRoot()
+
+	msg, err := Parse(outer.Finish())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested := msg.Root().Object(0)
+	if nested.IsNull() {
+		t.Fatal("the embedded message is not reachable")
+	}
+	if got := nested.Uint32(0); got != 0xcafebabe {
+		t.Errorf("first field of the embedded message = %#x, want 0xcafebabe", got)
+	}
+	if got := nested.Uint32(4); got != 7 {
+		t.Errorf("second field of the embedded message = %d, want 7", got)
+	}
+}
+
+// TestEmbedRefusesWhatIsNotAMessage — an absent or malformed field embeds as
+// the null pointer, so a caller need not ask first.
+func TestEmbedRefusesWhatIsNotAMessage(t *testing.T) {
+	b := NewBuilder(64)
+	for _, bad := range [][]byte{nil, {}, []byte("short"), make([]byte, HeaderSize)} {
+		if at := b.Embed(bad); at != 0 {
+			t.Errorf("Embed(%d bytes) = %d, want 0", len(bad), at)
+		}
+	}
+}
