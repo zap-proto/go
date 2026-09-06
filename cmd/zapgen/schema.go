@@ -155,3 +155,76 @@ func (t Type) SlotSize() int {
 	}
 	return 0
 }
+
+// Shape says how one list field's elements sit on the wire.
+//
+// It is DERIVED, never declared. A list of numbers is a run of numbers, a
+// list of fixed-width byte runs is those runs back to back, a list of
+// structs that are all fixed width is those payloads back to back, and a
+// list of structs carrying a variable tail is a run of relative pointers to
+// payloads written elsewhere. The element type already answers the question,
+// so the schema never spells it and no two schemas can spell it differently.
+type Shape uint8
+
+const (
+	ShapeNumber  Shape = iota // fixed-width numbers; stride is the width
+	ShapeFixed                // bytes_fixed[N]; stride N
+	ShapeInline               // struct with no tail; stride is its payload size
+	ShapePointer              // struct with a tail; stride 4, one signed rel offset each
+)
+
+// ptrStride is the width of one relative pointer in a pointer list.
+const ptrStride = 4
+
+// Tail reports whether s carries anything outside its fixed payload — a
+// bytes/text run, a list, or a pointer to another struct. A struct with a
+// tail cannot live inline in a list, because its tail has nowhere to go
+// between two neighbours; that is the whole of the Inline/Pointer question.
+func (f *File) Tail(s *Struct) bool {
+	for _, fd := range s.Fields {
+		switch fd.Type.Kind {
+		case KindBytes, KindText, KindList, KindStruct:
+			return true
+		}
+	}
+	return false
+}
+
+// Struct returns the named struct, or nil.
+func (f *File) Struct(name string) *Struct {
+	for _, s := range f.Structs {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
+// Shape classifies a list ELEMENT type.
+func (f *File) Shape(elem Type) Shape {
+	switch elem.Kind {
+	case KindBytesFixed:
+		return ShapeFixed
+	case KindStruct:
+		if s := f.Struct(elem.StructName); s != nil && f.Tail(s) {
+			return ShapePointer
+		}
+		return ShapeInline
+	}
+	return ShapeNumber
+}
+
+// Stride is the per-element width of a list of elem, and the clamp a reader
+// gets for free from the schema: length * stride must fit what is left of the
+// buffer, so a lying length word is refused once instead of at every element.
+func (f *File) Stride(elem Type) int {
+	switch f.Shape(elem) {
+	case ShapeFixed:
+		return elem.FixedSize
+	case ShapeInline:
+		return structSize(f.Struct(elem.StructName))
+	case ShapePointer:
+		return ptrStride
+	}
+	return elem.SlotSize()
+}

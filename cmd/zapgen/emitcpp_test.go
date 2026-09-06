@@ -105,18 +105,18 @@ func TestBackendsShareOneModel(t *testing.T) {
 	}
 }
 
-// TestCPPWritesTheSameWireVersionAsGo pins the one place the two runtimes
-// disagree by default: zap.NewBuilder writes version 1 and zap::Builder writes
-// version 2, so the generated C++ has to name the version or the two builders
-// emit different headers from one schema.
+// TestCPPWritesTheSameWireVersionAsGo pins the header both generated builders
+// write. The two runtimes default differently, so both backends name the
+// version, and the one they name is 2 — the header every vector in the Lux
+// chain corpus opens with.
 func TestCPPWritesTheSameWireVersionAsGo(t *testing.T) {
 	file := parseFile(t, "testdata/basetx.zap")
 	src, _, err := emitSingleString(EmitCPPSingle, file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(src, "zap::Builder b(256, zap::kVersion1)") {
-		t.Error("generated C++ builder does not pin the Go builder's wire version")
+	if !strings.Contains(src, "zap::Builder b(256, zap::kVersion2)") {
+		t.Error("generated C++ builder does not write the chains' wire version")
 	}
 }
 
@@ -206,8 +206,8 @@ func emitSingleString(emit func(*File) (string, []byte, error), f *File) (string
 // brace fixture and its indentation-only twin generate byte-identical C++ too.
 // The desugar is shared, so this is what it means for it to be shared.
 func TestWhitespaceEquivalenceCPP(t *testing.T) {
-	brace := emitAllCPP(t, "testdata/basetx.zap", "schema.zap")
-	ws := emitAllCPP(t, "testdata/ws/basetx_ws.zap", "schema.zap")
+	brace := emitAllCPP(t, "testdata/packed.zap", "schema.zap")
+	ws := emitAllCPP(t, "testdata/ws/packed_ws.zap", "schema.zap")
 	if len(brace) != len(ws) {
 		t.Fatalf("file-count mismatch: brace=%d ws=%d", len(brace), len(ws))
 	}

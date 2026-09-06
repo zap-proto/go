@@ -82,7 +82,7 @@ func indent(b []byte) string {
 // Go. Pairing is by basename: testdata/<x>.zap <-> testdata/ws/<x>_ws.zap.
 func TestWhitespaceEquivalence(t *testing.T) {
 	pairs := []struct{ brace, ws string }{
-		{"testdata/basetx.zap", "testdata/ws/basetx_ws.zap"},
+		{"testdata/packed.zap", "testdata/ws/packed_ws.zap"},
 	}
 	for _, pair := range pairs {
 		pair := pair

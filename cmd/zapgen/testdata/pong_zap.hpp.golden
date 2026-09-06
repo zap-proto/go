@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <span>
 #include <vector>
@@ -43,15 +45,40 @@ inline std::expected<Pong, zap::Error> WrapPong(std::span<const std::uint8_t> b)
     return Pong(m->root());
 }
 
+// The value records, declared before they are defined.
+struct PongInput;
+
 // PongInput collects the field values for NewPong. A borrowed field is a view:
 // it must outlive the call, not the buffer the call returns.
 struct PongInput {
     std::uint64_t Seq{};
 };
 
+// The write side, declared before it is defined so a struct may point at
+// one that comes later in the schema.
+inline std::vector<std::uint8_t> NewPong(const PongInput& in);
+inline std::int64_t AppendPong(zap::Builder& b, const PongInput& in);
+inline std::array<std::uint8_t, static_cast<std::size_t>(kPongSize)> EncodePong(const PongInput& in);
+
+// EncodePong lays one Pong payload out as an inline list element:
+// the fixed section alone, unaligned, exactly as wide as the stride.
+inline std::array<std::uint8_t, static_cast<std::size_t>(kPongSize)> EncodePong(const PongInput& in) {
+    std::array<std::uint8_t, static_cast<std::size_t>(kPongSize)> e{};
+    zap::store_u64(e.data() + kPongSeqOff, in.Seq);
+    return e;
+}
+
+// AppendPong writes one Pong object into b — every payload it points at first,
+// then the object itself — and returns the object's offset.
+inline std::int64_t AppendPong(zap::Builder& b, const PongInput& in) {
+    auto ob = b.start_object(kPongSize);
+    ob.set_u64(kPongSeqOff, in.Seq);
+    return ob.finish();
+}
+
 // NewPong writes a ZAP-encoded Pong message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewPong(const PongInput& in) {
-    zap::Builder b(256, zap::kVersion1);
+    zap::Builder b(256, zap::kVersion2);
     auto ob = b.start_object(kPongSize);
     ob.set_u64(kPongSeqOff, in.Seq);
     ob.finish_as_root();

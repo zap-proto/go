@@ -9,11 +9,11 @@ import (
 
 const (
 	baseTxNetworkIDOff    = 0
-	baseTxBlockchainIDOff = 4
-	baseTxOutsOff         = 36
-	baseTxInsOff          = 44
-	baseTxMemoOff         = 52
-	baseTxSize            = 60
+	baseTxBlockchainIDOff = 8
+	baseTxOutsOff         = 40
+	baseTxInsOff          = 48
+	baseTxMemoOff         = 56
+	baseTxSize            = 64
 )
 
 // BaseTx is a zero-copy view into a ZAP-encoded BaseTx message.
@@ -35,35 +35,89 @@ func (t BaseTx) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(baseTxBlockchainIDOff, 32))
 	return out
 }
-func (t BaseTx) Outs() zap.List { return t.o.List(baseTxOutsOff) }
-func (t BaseTx) Ins() zap.List  { return t.o.List(baseTxInsOff) }
-func (t BaseTx) Memo() []byte   { return t.o.Bytes(baseTxMemoOff) }
+func (t BaseTx) Outs() zap.List        { return t.o.ListStride(baseTxOutsOff, 4) }
+func (t BaseTx) OutsAt(i int) Transfer { return Transfer{o: t.Outs().ObjectPtr(i)} }
+func (t BaseTx) Ins() zap.List         { return t.o.ListStride(baseTxInsOff, 4) }
+func (t BaseTx) InsAt(i int) Spend     { return Spend{o: t.Ins().ObjectPtr(i)} }
+func (t BaseTx) Memo() []byte          { return t.o.Bytes(baseTxMemoOff) }
 
 // BaseTxInput collects the field values for NewBaseTx.
 type BaseTxInput struct {
 	NetworkID    uint32
 	BlockchainID [32]byte
-	Outs         [][]byte
-	Ins          [][]byte
+	Outs         []TransferInput
+	Ins          []SpendInput
 	Memo         []byte
+}
+
+// AppendBaseTx writes one BaseTx object into b — every payload it points at first,
+// then the object itself — and returns the object's offset.
+func AppendBaseTx(b *zap.Builder, in BaseTxInput) int {
+	outsOff := 0
+	if len(in.Outs) > 0 {
+		outsPtrs := make([]int, 0, len(in.Outs))
+		for _, elem := range in.Outs {
+			outsPtrs = append(outsPtrs, AppendTransfer(b, elem))
+		}
+		lb := b.StartList(4)
+		for _, at := range outsPtrs {
+			lb.AddObjectPtr(at)
+		}
+		outsOff = lb.FinishOffset()
+	}
+	insOff := 0
+	if len(in.Ins) > 0 {
+		insPtrs := make([]int, 0, len(in.Ins))
+		for _, elem := range in.Ins {
+			insPtrs = append(insPtrs, AppendSpend(b, elem))
+		}
+		lb := b.StartList(4)
+		for _, at := range insPtrs {
+			lb.AddObjectPtr(at)
+		}
+		insOff = lb.FinishOffset()
+	}
+	ob := b.StartObject(baseTxSize)
+	ob.SetUint32(baseTxNetworkIDOff, in.NetworkID)
+	ob.SetBytesFixed(baseTxBlockchainIDOff, in.BlockchainID[:])
+	ob.SetList(baseTxOutsOff, outsOff, len(in.Outs))
+	ob.SetList(baseTxInsOff, insOff, len(in.Ins))
+	ob.SetBytes(baseTxMemoOff, in.Memo)
+	return ob.Finish()
 }
 
 // NewBaseTx builds a ZAP-encoded BaseTx message from in and returns the bytes.
 func NewBaseTx(in BaseTxInput) []byte {
-	b := zap.NewBuilder(256)
+	b := zap.NewBuilderV2(256)
+	outsOff := 0
+	if len(in.Outs) > 0 {
+		outsPtrs := make([]int, 0, len(in.Outs))
+		for _, elem := range in.Outs {
+			outsPtrs = append(outsPtrs, AppendTransfer(b, elem))
+		}
+		lb := b.StartList(4)
+		for _, at := range outsPtrs {
+			lb.AddObjectPtr(at)
+		}
+		outsOff = lb.FinishOffset()
+	}
+	insOff := 0
+	if len(in.Ins) > 0 {
+		insPtrs := make([]int, 0, len(in.Ins))
+		for _, elem := range in.Ins {
+			insPtrs = append(insPtrs, AppendSpend(b, elem))
+		}
+		lb := b.StartList(4)
+		for _, at := range insPtrs {
+			lb.AddObjectPtr(at)
+		}
+		insOff = lb.FinishOffset()
+	}
 	ob := b.StartObject(baseTxSize)
 	ob.SetUint32(baseTxNetworkIDOff, in.NetworkID)
 	ob.SetBytesFixed(baseTxBlockchainIDOff, in.BlockchainID[:])
-	outsLB := b.StartList(0)
-	for _, elem := range in.Outs {
-		outsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseTxOutsOff, outsLB.FinishOffset(), len(in.Outs))
-	insLB := b.StartList(0)
-	for _, elem := range in.Ins {
-		insLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseTxInsOff, insLB.FinishOffset(), len(in.Ins))
+	ob.SetList(baseTxOutsOff, outsOff, len(in.Outs))
+	ob.SetList(baseTxInsOff, insOff, len(in.Ins))
 	ob.SetBytes(baseTxMemoOff, in.Memo)
 	ob.FinishAsRoot()
 	return b.Finish()

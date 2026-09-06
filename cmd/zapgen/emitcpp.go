@@ -41,12 +41,12 @@ import (
 // cppBuilderVersion is the wire version the generated C++ builder writes.
 //
 // It is spelled rather than defaulted because the two runtimes default
-// differently: zap.NewBuilder writes version 1, zap::Builder writes version 2.
-// A generated builder that took either default would emit a different header
-// in each language from one schema, and the first thing this backend has to be
-// is byte-for-byte with the Go one. The data segment is identical across
-// versions; only header byte 4 differs.
-const cppBuilderVersion = "zap::kVersion1"
+// differently. Version 2 is the one the Lux chains actually carry — every
+// vector in the chain corpus opens 5a 41 50 00 02 00 — and the hardened
+// runtime the chains build on emits it by default, so a generated builder
+// that wrote version 1 would produce a header no chain has ever written.
+// The data segment is identical across versions; only header byte 4 differs.
+const cppBuilderVersion = "zap::kVersion2"
 
 // EmitCPP emits one header per struct AND one per interface in f, keyed by
 // basename. Mirrors Emit's contract so a caller can pick a backend without
@@ -54,17 +54,20 @@ const cppBuilderVersion = "zap::kVersion1"
 func EmitCPP(f *File) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(f.Structs)+len(f.Interfaces))
 	for _, s := range f.Structs {
-		if err := validate(s); err != nil {
+		if err := validate(f, s); err != nil {
 			return nil, err
 		}
 		var w bytes.Buffer
 		one := []*Struct{s}
-		writeCPPPrologue(&w, f, cppNeeds(one, nil))
+		writeCPPPrologue(&w, f, cppNeeds(f, one, nil))
 		writeCPPIncludes(&w, f, s)
 		writeCPPOpen(&w, f)
-		writeCPPForwards(&w, one)
+		writeCPPForwards(&w, f, one)
 		emitCPPStruct(&w, f, s)
 		emitCPPOutOfLine(&w, f, one)
+		if err := emitCPPWriters(&w, f, one); err != nil {
+			return nil, err
+		}
 		writeCPPClose(&w, f)
 		out[snakeCase(s.Name)+"_zap.hpp"] = w.Bytes()
 	}
@@ -73,7 +76,7 @@ func EmitCPP(f *File) (map[string][]byte, error) {
 			return nil, err
 		}
 		var w bytes.Buffer
-		writeCPPPrologue(&w, f, cppNeeds(nil, []*Interface{iface}))
+		writeCPPPrologue(&w, f, cppNeeds(f, nil, []*Interface{iface}))
 		writeCPPOpen(&w, f)
 		emitCPPInterface(&w, iface)
 		writeCPPClose(&w, f)
@@ -89,7 +92,7 @@ func EmitCPPSingle(f *File) (string, []byte, error) {
 		return "", nil, fmt.Errorf("no structs or interfaces to emit")
 	}
 	for _, s := range f.Structs {
-		if err := validate(s); err != nil {
+		if err := validate(f, s); err != nil {
 			return "", nil, err
 		}
 	}
@@ -99,13 +102,16 @@ func EmitCPPSingle(f *File) (string, []byte, error) {
 		}
 	}
 	var w bytes.Buffer
-	writeCPPPrologue(&w, f, cppNeeds(f.Structs, f.Interfaces))
+	writeCPPPrologue(&w, f, cppNeeds(f, f.Structs, f.Interfaces))
 	writeCPPOpen(&w, f)
-	writeCPPForwards(&w, f.Structs)
+	writeCPPForwards(&w, f, f.Structs)
 	for _, s := range f.Structs {
 		emitCPPStruct(&w, f, s)
 	}
 	emitCPPOutOfLine(&w, f, f.Structs)
+	if err := emitCPPWriters(&w, f, f.Structs); err != nil {
+		return "", nil, err
+	}
 	for _, iface := range f.Interfaces {
 		emitCPPInterface(&w, iface)
 	}
@@ -131,24 +137,46 @@ func stem(name string) string {
 type needs struct {
 	structs bool // any struct: <zap/zap.hpp>, <expected>, <span>, <vector>, <cstdint>
 	rpc     bool // any interface: <zap/rpc.hpp>, <string>
-	fixed   bool // bytes_fixed: <array>
+	fixed   bool // bytes_fixed or an inline payload: <array>
 	text    bool // text: <string_view>
 	bits    bool // f32 / f64: <bit>
+	maybe   bool // a nested struct field: <optional>
+	mem     bool // a fixed byte run copied into a payload: <cstring>
 }
 
-func cppNeeds(structs []*Struct, ifaces []*Interface) needs {
+func cppNeeds(file *File, structs []*Struct, ifaces []*Interface) needs {
 	var n needs
 	n.structs = len(structs) > 0
 	n.rpc = len(ifaces) > 0
 	for _, s := range structs {
+		if !file.Tail(s) {
+			// Encode lays a payload out in a std::array with memcpy.
+			n.fixed = true
+			n.mem = true
+		}
 		for _, f := range s.Fields {
 			switch f.Type.Kind {
 			case KindBytesFixed:
 				n.fixed = true
+				n.mem = true
 			case KindText:
 				n.text = true
 			case KindF32, KindF64:
 				n.bits = true
+			case KindStruct:
+				n.maybe = true
+			case KindList:
+				elem := *f.Type.ListElem
+				switch elem.Kind {
+				case KindBytesFixed:
+					n.fixed = true
+				case KindF32, KindF64:
+					n.bits = true
+				}
+				if file.Shape(elem) == ShapeInline {
+					n.fixed = true
+					n.mem = true
+				}
 			}
 		}
 	}
@@ -167,7 +195,13 @@ func writeCPPPrologue(w *bytes.Buffer, f *File, n needs) {
 		w.WriteString("#include <bit>\n")
 	}
 	w.WriteString("#include <cstdint>\n")
+	if n.mem {
+		w.WriteString("#include <cstring>\n")
+	}
 	w.WriteString("#include <expected>\n")
+	if n.maybe {
+		w.WriteString("#include <optional>\n")
+	}
 	w.WriteString("#include <span>\n")
 	if n.rpc {
 		w.WriteString("#include <string>\n")
@@ -188,10 +222,10 @@ func writeCPPPrologue(w *bytes.Buffer, f *File, n needs) {
 func writeCPPIncludes(w *bytes.Buffer, f *File, s *Struct) {
 	seen := map[string]bool{s.Name: true}
 	var names []string
-	for _, fd := range s.Fields {
-		if fd.Type.Kind == KindStruct && !seen[fd.Type.StructName] {
-			seen[fd.Type.StructName] = true
-			names = append(names, fd.Type.StructName)
+	for _, name := range named(f, s) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
 		}
 	}
 	if len(names) == 0 {
@@ -217,7 +251,7 @@ func writeCPPClose(w *bytes.Buffer, f *File) {
 // declaration is enough to declare them, and by the time they are defined
 // every class is complete. Declaration order in the schema then carries no
 // meaning, and a cycle between two structs is expressible.
-func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
+func writeCPPForwards(w *bytes.Buffer, file *File, structs []*Struct) {
 	seen := map[string]bool{}
 	var names []string
 	add := func(name string) {
@@ -232,10 +266,8 @@ func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
 	// Also every class this file NAMES: a per-struct file declares its
 	// nested types here and includes their headers for the definitions.
 	for _, s := range structs {
-		for _, f := range s.Fields {
-			if f.Type.Kind == KindStruct {
-				add(f.Type.StructName)
-			}
+		for _, name := range named(file, s) {
+			add(name)
 		}
 	}
 	if len(names) == 0 {
@@ -252,8 +284,6 @@ func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
 func emitCPPStruct(w *bytes.Buffer, f *File, s *Struct) {
 	emitCPPOffsets(w, s)
 	emitCPPReader(w, f, s)
-	emitCPPBuilder(w, s)
-	w.WriteString("\n")
 }
 
 // cppTypeName qualifies a generated class with its namespace. A field may
@@ -342,7 +372,14 @@ func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 		fmt.Fprintf(w, "        return b.size() == %d ? b : std::span<const std::uint8_t>(zero);\n", f.Type.FixedSize)
 		w.WriteString("    }\n")
 	case KindList:
-		fmt.Fprintf(w, "    zap::List %s() const { return o_.list(%s); }\n", f.Name, off)
+		// list_stride, not list: the schema knows the element width, so the
+		// reader gets the clamp for free — length * stride has to fit what is
+		// left of the buffer, and a lying length word dies once here instead
+		// of at every element.
+		elem := *f.Type.ListElem
+		fmt.Fprintf(w, "    zap::List %s() const { return o_.list_stride(%s, %d); }\n",
+			f.Name, off, file.Stride(elem))
+		emitCPPElement(w, file, f, elem)
 	case KindStruct:
 		// Declared here, defined by emitCPPOutOfLine once every class exists.
 		fmt.Fprintf(w, "    %s %s() const;\n", cppTypeName(file, f.Type.StructName), f.Name)
@@ -354,18 +391,36 @@ func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 // is complete, so schema declaration order does not constrain the header.
 func emitCPPOutOfLine(w *bytes.Buffer, file *File, structs []*Struct) {
 	first := true
+	head := func() {
+		if first {
+			w.WriteString("// Accessors that return another class, defined once every class above\n")
+			w.WriteString("// is complete.\n")
+			first = false
+		}
+	}
 	for _, s := range structs {
 		for _, f := range s.Fields {
-			if f.Type.Kind != KindStruct {
-				continue
+			switch f.Type.Kind {
+			case KindStruct:
+				head()
+				name := cppTypeName(file, f.Type.StructName)
+				fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
+					name, s.Name, f.Name, name, cppOffsetName(s, f))
+			case KindList:
+				elem := *f.Type.ListElem
+				shape := file.Shape(elem)
+				if shape != ShapeInline && shape != ShapePointer {
+					continue
+				}
+				head()
+				name := cppTypeName(file, elem.StructName)
+				reach := fmt.Sprintf("object_ptr(i)")
+				if shape == ShapeInline {
+					reach = fmt.Sprintf("object(i, %d)", file.Stride(elem))
+				}
+				fmt.Fprintf(w, "inline %s %s::%sAt(std::int64_t i) const { return %s(%s().%s); }\n",
+					name, s.Name, f.Name, name, f.Name, reach)
 			}
-			if first {
-				w.WriteString("// Nested-struct accessors, defined once every class above is complete.\n")
-				first = false
-			}
-			name := cppTypeName(file, f.Type.StructName)
-			fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
-				name, s.Name, f.Name, name, cppOffsetName(s, f))
 		}
 	}
 	if !first {
@@ -373,31 +428,231 @@ func emitCPPOutOfLine(w *bytes.Buffer, file *File, structs []*Struct) {
 	}
 }
 
-func emitCPPBuilder(w *bytes.Buffer, s *Struct) {
+// --- builders ---------------------------------------------------------------
+//
+// Three entry points per struct, and they are three because the wire has three
+// places a struct can sit:
+//
+//	New<S>     a message of its own — builder, payloads, root, bytes
+//	Append<S>  one object inside a message somebody else is writing
+//	Encode<S>  one element of an inline list — the payload alone, no alignment
+//
+// Encode is emitted only for a struct with no tail, because a struct with a
+// tail has nowhere to put it between two neighbours in a run.
+//
+// ORDER IS THE WIRE. Every payload a struct points at — its list runs, its
+// nested objects — is written BEFORE the struct's own object, so the pointer
+// fields are set from offsets that already exist. That is the order the Lux
+// reference writes, and writing the object first would move every byte after
+// it.
+
+// emitCPPInput emits the value record New/Append/Encode take.
+func emitCPPInput(w *bytes.Buffer, file *File, s *Struct) {
 	fmt.Fprintf(w, "// %sInput collects the field values for New%s. A borrowed field is a view:\n", s.Name, s.Name)
 	w.WriteString("// it must outlive the call, not the buffer the call returns.\n")
 	fmt.Fprintf(w, "struct %sInput {\n", s.Name)
 	for _, f := range s.Fields {
-		fmt.Fprintf(w, "    %s %s{};\n", cppInputType(f.Type), f.Name)
+		fmt.Fprintf(w, "    %s %s{};\n", cppInputType(file, f.Type), f.Name)
 	}
 	w.WriteString("};\n\n")
+}
 
+// emitCPPWriterDecls declares the three entry points for every struct up
+// front, so a struct may point at one declared later without the schema's
+// declaration order meaning anything.
+func emitCPPWriterDecls(w *bytes.Buffer, file *File, structs []*Struct) {
+	if len(structs) == 0 {
+		return
+	}
+	w.WriteString("// The write side, declared before it is defined so a struct may point at\n")
+	w.WriteString("// one that comes later in the schema.\n")
+	for _, s := range structs {
+		fmt.Fprintf(w, "inline std::vector<std::uint8_t> New%s(const %sInput& in);\n", s.Name, s.Name)
+		fmt.Fprintf(w, "inline std::int64_t Append%s(zap::Builder& b, const %sInput& in);\n", s.Name, s.Name)
+		if !file.Tail(s) {
+			fmt.Fprintf(w, "inline std::array<std::uint8_t, %s> Encode%s(const %sInput& in);\n",
+				cppArraySize(s), s.Name, s.Name)
+		}
+	}
+	w.WriteString("\n")
+}
+
+func cppArraySize(s *Struct) string {
+	return fmt.Sprintf("static_cast<std::size_t>(%s)", cppSizeName(s))
+}
+
+func emitCPPWriter(w *bytes.Buffer, file *File, s *Struct) {
+	if !file.Tail(s) {
+		emitCPPEncode(w, file, s)
+	}
+	emitCPPAppend(w, file, s)
+	emitCPPNew(w, file, s)
+}
+
+// emitCPPEncode writes one inline list element: the fixed payload and nothing
+// else. No alignment, no pointer — a run of these IS the list.
+func emitCPPEncode(w *bytes.Buffer, file *File, s *Struct) {
+	fmt.Fprintf(w, "// Encode%s lays one %s payload out as an inline list element:\n", s.Name, s.Name)
+	w.WriteString("// the fixed section alone, unaligned, exactly as wide as the stride.\n")
+	fmt.Fprintf(w, "inline std::array<std::uint8_t, %s> Encode%s(const %sInput& in) {\n",
+		cppArraySize(s), s.Name, s.Name)
+	fmt.Fprintf(w, "    std::array<std::uint8_t, %s> e{};\n", cppArraySize(s))
+	for _, f := range s.Fields {
+		emitCPPEncodeField(w, s, f)
+	}
+	w.WriteString("    return e;\n}\n\n")
+}
+
+func emitCPPEncodeField(w *bytes.Buffer, s *Struct, f *Field) {
+	at := fmt.Sprintf("e.data() + %s", cppOffsetName(s, f))
+	switch f.Type.Kind {
+	case KindBool:
+		fmt.Fprintf(w, "    *(%s) = in.%s ? 1 : 0;\n", at, f.Name)
+	case KindU8:
+		fmt.Fprintf(w, "    *(%s) = in.%s;\n", at, f.Name)
+	case KindI8:
+		fmt.Fprintf(w, "    *(%s) = static_cast<std::uint8_t>(in.%s);\n", at, f.Name)
+	case KindU16:
+		fmt.Fprintf(w, "    zap::store_u16(%s, in.%s);\n", at, f.Name)
+	case KindI16:
+		fmt.Fprintf(w, "    zap::store_u16(%s, static_cast<std::uint16_t>(in.%s));\n", at, f.Name)
+	case KindU32:
+		fmt.Fprintf(w, "    zap::store_u32(%s, in.%s);\n", at, f.Name)
+	case KindI32:
+		fmt.Fprintf(w, "    zap::store_u32(%s, static_cast<std::uint32_t>(in.%s));\n", at, f.Name)
+	case KindF32:
+		fmt.Fprintf(w, "    zap::store_u32(%s, std::bit_cast<std::uint32_t>(in.%s));\n", at, f.Name)
+	case KindU64:
+		fmt.Fprintf(w, "    zap::store_u64(%s, in.%s);\n", at, f.Name)
+	case KindI64:
+		fmt.Fprintf(w, "    zap::store_u64(%s, static_cast<std::uint64_t>(in.%s));\n", at, f.Name)
+	case KindF64:
+		fmt.Fprintf(w, "    zap::store_u64(%s, std::bit_cast<std::uint64_t>(in.%s));\n", at, f.Name)
+	case KindBytesFixed:
+		fmt.Fprintf(w, "    std::memcpy(%s, in.%s.data(), %d);\n", at, f.Name, f.Type.FixedSize)
+	}
+}
+
+// emitCPPAppend writes one object into a builder somebody else owns, and
+// returns where it landed.
+func emitCPPAppend(w *bytes.Buffer, file *File, s *Struct) {
+	fmt.Fprintf(w, "// Append%s writes one %s object into b — every payload it points at first,\n", s.Name, s.Name)
+	w.WriteString("// then the object itself — and returns the object's offset.\n")
+	fmt.Fprintf(w, "inline std::int64_t Append%s(zap::Builder& b, const %sInput& in) {\n", s.Name, s.Name)
+	emitCPPBody(w, file, s)
+	w.WriteString("    return ob.finish();\n}\n\n")
+}
+
+func emitCPPNew(w *bytes.Buffer, file *File, s *Struct) {
 	fmt.Fprintf(w, "// New%s writes a ZAP-encoded %s message into a fresh buffer and returns it.\n", s.Name, s.Name)
 	fmt.Fprintf(w, "inline std::vector<std::uint8_t> New%s(const %sInput& in) {\n", s.Name, s.Name)
 	fmt.Fprintf(w, "    zap::Builder b(256, %s);\n", cppBuilderVersion)
-	fmt.Fprintf(w, "    auto ob = b.start_object(%s);\n", cppSizeName(s))
-	for _, f := range s.Fields {
-		emitCPPFieldWriter(w, s, f)
-	}
+	emitCPPBody(w, file, s)
 	w.WriteString("    ob.finish_as_root();\n")
-	w.WriteString("    return b.finish();\n")
-	w.WriteString("}\n")
+	w.WriteString("    return b.finish();\n}\n\n")
 }
 
-// cppInputType is the C++ type of one Input field. It is the type the Go
-// backend uses, said in C++: a value for a scalar, a fixed array for
-// bytes_fixed[N], and a view for anything the caller already holds bytes for.
-func cppInputType(t Type) string {
+// emitCPPBody writes the payloads, opens the object, and sets every field. It
+// leaves `ob` in scope for the caller to finish.
+func emitCPPBody(w *bytes.Buffer, file *File, s *Struct) {
+	for _, f := range s.Fields {
+		emitCPPPayload(w, file, s, f)
+	}
+	fmt.Fprintf(w, "    auto ob = b.start_object(%s);\n", cppSizeName(s))
+	for _, f := range s.Fields {
+		emitCPPFieldWriter(w, file, s, f)
+	}
+}
+
+// cppPayloadVar names the local holding a field's payload offset.
+func cppPayloadVar(f *Field) string { return lowerFirst(f.Name) + "_off" }
+
+// emitCPPPayload writes whatever a field points at, before the object exists.
+// An empty list writes nothing at all: the reference leaves the pointer pair
+// null and does not align, and an alignment pad nobody asked for would move
+// every byte after it.
+func emitCPPPayload(w *bytes.Buffer, file *File, s *Struct, f *Field) {
+	switch f.Type.Kind {
+	case KindStruct:
+		v := cppPayloadVar(f)
+		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
+		fmt.Fprintf(w, "    if (in.%s) %s = Append%s(b, *in.%s);\n",
+			f.Name, v, f.Type.StructName, f.Name)
+	case KindList:
+		elem := *f.Type.ListElem
+		v := cppPayloadVar(f)
+		stride := file.Stride(elem)
+		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
+		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
+		if file.Shape(elem) == ShapePointer {
+			ptrs := lowerFirst(f.Name) + "_ptrs"
+			fmt.Fprintf(w, "        std::vector<std::int64_t> %s;\n", ptrs)
+			fmt.Fprintf(w, "        %s.reserve(in.%s.size());\n", ptrs, f.Name)
+			fmt.Fprintf(w, "        for (const auto& elem : in.%s) %s.push_back(Append%s(b, elem));\n",
+				f.Name, ptrs, elem.StructName)
+			fmt.Fprintf(w, "        auto lb = b.start_list(%d);\n", stride)
+			fmt.Fprintf(w, "        for (const auto off : %s) lb.add_object_ptr(off);\n", ptrs)
+			fmt.Fprintf(w, "        %s = lb.finish().first;\n", v)
+			w.WriteString("    }\n")
+			return
+		}
+		fmt.Fprintf(w, "        auto lb = b.start_list(%d);\n", stride)
+		switch file.Shape(elem) {
+		case ShapeFixed:
+			fmt.Fprintf(w, "        for (const auto& elem : in.%s) lb.add_bytes(elem);\n", f.Name)
+		case ShapeInline:
+			fmt.Fprintf(w, "        for (const auto& elem : in.%s) {\n", f.Name)
+			fmt.Fprintf(w, "            const auto payload = Encode%s(elem);\n", elem.StructName)
+			w.WriteString("            lb.add_bytes(payload);\n")
+			w.WriteString("        }\n")
+		default:
+			fmt.Fprintf(w, "        for (const auto& elem : in.%s) lb.%s(%s);\n",
+				f.Name, cppListAdd(elem), cppListValue(elem))
+		}
+		fmt.Fprintf(w, "        %s = lb.finish().first;\n", v)
+		w.WriteString("    }\n")
+	}
+}
+
+// cppListAdd names the runtime call that lays one number down.
+func cppListAdd(elem Type) string {
+	switch elem.SlotSize() {
+	case 1:
+		return "add_u8"
+	case 4:
+		return "add_u32"
+	case 8:
+		return "add_u64"
+	}
+	return "add_u32"
+}
+
+// cppListValue is the element expression, cast to the unsigned width the
+// runtime lays down. A signed or float element is the same bits either way.
+func cppListValue(elem Type) string {
+	switch elem.Kind {
+	case KindBool:
+		return "elem ? 1 : 0"
+	case KindI8:
+		return "static_cast<std::uint8_t>(elem)"
+	case KindI32:
+		return "static_cast<std::uint32_t>(elem)"
+	case KindI64:
+		return "static_cast<std::uint64_t>(elem)"
+	case KindF32:
+		return "std::bit_cast<std::uint32_t>(elem)"
+	case KindF64:
+		return "std::bit_cast<std::uint64_t>(elem)"
+	}
+	return "elem"
+}
+
+// cppInputType is the C++ type of one Input field: a value for a scalar, a
+// fixed array for bytes_fixed[N], a view for a byte run the caller already
+// holds, and the nested type's own Input wherever the wire holds a struct —
+// so a whole tree is one value and the caller never hands over pre-built
+// bytes it cannot check.
+func cppInputType(file *File, t Type) string {
 	switch t.Kind {
 	case KindBool:
 		return "bool"
@@ -426,19 +681,22 @@ func cppInputType(t Type) string {
 	case KindBytes:
 		return "std::span<const std::uint8_t>"
 	case KindBytesFixed:
-		// Exactly N bytes by construction, as Go's [N]byte is.
 		return fmt.Sprintf("std::array<std::uint8_t, %d>", t.FixedSize)
 	case KindList:
-		// One pre-built entry per element, as Go's [][]byte is.
-		return "std::vector<std::span<const std::uint8_t>>"
+		// A list element is held by value. Only a nested FIELD is optional,
+		// and only because a field can be absent; an absent list element is
+		// just a shorter list.
+		if t.ListElem.Kind == KindStruct {
+			return "std::vector<" + t.ListElem.StructName + "Input>"
+		}
+		return "std::vector<" + cppInputType(file, *t.ListElem) + ">"
 	case KindStruct:
-		// A pre-built sub-buffer, as Go's []byte is.
-		return "std::span<const std::uint8_t>"
+		return "std::optional<" + t.StructName + "Input>"
 	}
 	return "std::span<const std::uint8_t>"
 }
 
-func emitCPPFieldWriter(w *bytes.Buffer, s *Struct, f *Field) {
+func emitCPPFieldWriter(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 	off := cppOffsetName(s, f)
 	switch f.Type.Kind {
 	case KindBool:
@@ -469,26 +727,11 @@ func emitCPPFieldWriter(w *bytes.Buffer, s *Struct, f *Field) {
 		fmt.Fprintf(w, "    ob.set_bytes(%s, in.%s);\n", off, f.Name)
 	case KindBytesFixed:
 		fmt.Fprintf(w, "    ob.set_bytes_fixed(%s, std::span<const std::uint8_t>(in.%s));\n", off, f.Name)
-	case KindList:
-		// One entry per element: a 4-byte little-endian length, then the
-		// payload. Both halves are runtime writes — add_u32 lays the length
-		// word, add_bytes the payload — and the element COUNT set_list carries
-		// is the caller's, not the byte count add_bytes accumulated. Same
-		// bytes, same count word, as the Go backend's AddObjectBytes.
-		v := lowerFirst(f.Name) + "_list"
-		fmt.Fprintf(w, "    auto %s = b.start_list(0);\n", v)
-		fmt.Fprintf(w, "    for (const auto& elem : in.%s) {\n", f.Name)
-		fmt.Fprintf(w, "        %s.add_u32(static_cast<std::uint32_t>(elem.size()));\n", v)
-		fmt.Fprintf(w, "        %s.add_bytes(elem);\n", v)
-		w.WriteString("    }\n")
-		fmt.Fprintf(w, "    ob.set_list(%s, %s.finish().first, static_cast<std::int64_t>(in.%s.size()));\n",
-			off, v, f.Name)
 	case KindStruct:
-		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
-		fmt.Fprintf(w, "        auto nested = b.start_object(static_cast<std::int64_t>(in.%s.size()));\n", f.Name)
-		fmt.Fprintf(w, "        nested.set_bytes_fixed(0, in.%s);\n", f.Name)
-		fmt.Fprintf(w, "        ob.set_object(%s, nested.finish());\n", off)
-		w.WriteString("    }\n")
+		fmt.Fprintf(w, "    ob.set_object(%s, %s);\n", off, cppPayloadVar(f))
+	case KindList:
+		fmt.Fprintf(w, "    ob.set_list(%s, %s, static_cast<std::int64_t>(in.%s.size()));\n",
+			off, cppPayloadVar(f), f.Name)
 	}
 }
 
@@ -663,5 +906,130 @@ func emitCPPDispatchCase(w *bytes.Buffer, m *Method) {
 		w.WriteString("                return zap::rpc::build_response(zap::rpc::kStatusInternal, call->promise_id, {});\n")
 		w.WriteString("            }\n")
 		w.WriteString("            return zap::rpc::build_response(zap::rpc::kStatusOK, call->promise_id, {});\n")
+	}
+}
+
+// named lists the other structs s reaches: a nested object field, or the
+// element type of one of its lists. A per-struct header includes their
+// headers; a combined header only needs the forward declarations.
+func named(file *File, s *Struct) []string {
+	var out []string
+	for _, f := range s.Fields {
+		switch f.Type.Kind {
+		case KindStruct:
+			out = append(out, f.Type.StructName)
+		case KindList:
+			if f.Type.ListElem.Kind == KindStruct {
+				out = append(out, f.Type.ListElem.StructName)
+			}
+		}
+	}
+	return out
+}
+
+// emitCPPWriters emits the whole write side: the value records first, in
+// dependency order, then the three entry points per struct.
+//
+// The records go in dependency order because one holds another BY VALUE — a
+// nested struct's Input is a member, not a pointer — so the inner type has to
+// be complete where the outer one names it. A cycle would be a value that
+// contains itself, so a cycle is an error rather than an ordering to find.
+func emitCPPWriters(w *bytes.Buffer, file *File, structs []*Struct) error {
+	if len(structs) == 0 {
+		return nil
+	}
+	ordered, err := inputOrder(file, structs)
+	if err != nil {
+		return err
+	}
+	// The records name each other inside a std::vector, which C++ allows over
+	// an incomplete type but not over an unknown name.
+	w.WriteString("// The value records, declared before they are defined.\n")
+	for _, s := range structs {
+		fmt.Fprintf(w, "struct %sInput;\n", s.Name)
+	}
+	w.WriteString("\n")
+	for _, s := range ordered {
+		emitCPPInput(w, file, s)
+	}
+	emitCPPWriterDecls(w, file, structs)
+	for _, s := range structs {
+		emitCPPWriter(w, file, s)
+	}
+	return nil
+}
+
+// inputOrder sorts structs so that a struct comes after every struct it holds
+// by value. Only a nested struct FIELD is a by-value member; a list element is
+// held in a std::vector, which C++ allows over an incomplete type, so a list
+// does not constrain the order.
+func inputOrder(file *File, structs []*Struct) ([]*Struct, error) {
+	const (
+		unseen = 0
+		open   = 1
+		done   = 2
+	)
+	here := make(map[string]bool, len(structs))
+	for _, s := range structs {
+		here[s.Name] = true
+	}
+	state := make(map[string]int, len(structs))
+	var out []*Struct
+	var visit func(s *Struct) error
+	visit = func(s *Struct) error {
+		if !here[s.Name] {
+			// Its record lives in the sibling header this one includes.
+			state[s.Name] = done
+			return nil
+		}
+		switch state[s.Name] {
+		case done:
+			return nil
+		case open:
+			return fmt.Errorf("struct %s: a nested struct field cycles back to itself", s.Name)
+		}
+		state[s.Name] = open
+		for _, f := range s.Fields {
+			if f.Type.Kind != KindStruct {
+				continue
+			}
+			dep := file.Struct(f.Type.StructName)
+			if dep == nil || dep == s {
+				return fmt.Errorf("struct %s field %s: a nested struct field cycles back to itself",
+					s.Name, f.Name)
+			}
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		state[s.Name] = done
+		out = append(out, s)
+		return nil
+	}
+	for _, s := range structs {
+		if err := visit(s); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// emitCPPElement gives a list its typed element accessor. A run of numbers
+// already has one on zap::List, so only the two struct shapes and the fixed
+// byte run need naming here — and naming them is what keeps the stride out of
+// the caller's hands.
+func emitCPPElement(w *bytes.Buffer, file *File, f *Field, elem Type) {
+	switch file.Shape(elem) {
+	case ShapeFixed:
+		fmt.Fprintf(w, "    std::span<const std::uint8_t> %sAt(std::int64_t i) const {\n", f.Name)
+		fmt.Fprintf(w, "        static constexpr std::array<std::uint8_t, %d> zero{};\n", elem.FixedSize)
+		fmt.Fprintf(w, "        const auto b = %s().object(i, %d).bytes_fixed(0, %d);\n",
+			f.Name, elem.FixedSize, elem.FixedSize)
+		fmt.Fprintf(w, "        return b.size() == %d ? b : std::span<const std::uint8_t>(zero);\n", elem.FixedSize)
+		w.WriteString("    }\n")
+	case ShapeInline:
+		fmt.Fprintf(w, "    %s %sAt(std::int64_t i) const;\n", cppTypeName(file, elem.StructName), f.Name)
+	case ShapePointer:
+		fmt.Fprintf(w, "    %s %sAt(std::int64_t i) const;\n", cppTypeName(file, elem.StructName), f.Name)
 	}
 }
