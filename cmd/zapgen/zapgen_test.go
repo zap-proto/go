@@ -130,3 +130,52 @@ func emitAll(t *testing.T, path, srcName string) map[string][]byte {
 	}
 	return out
 }
+
+// TestARepeatedFieldNameIsRefused — a struct that declares one name twice is
+// not a schema, and the front end says so rather than handing every backend a
+// collision to discover in its own language.
+//
+// The P-chain hit this: an envelope's owner-address pool and the owner group a
+// transaction hands ownership TO were both called OwnerAddrs, and the emitted
+// Rust had a struct with the same member twice — source that does not compile,
+// found by rustc instead of by the line that wrote it.
+func TestARepeatedFieldNameIsRefused(t *testing.T) {
+	const src = `package p
+
+struct Two {
+    Addrs list<u32> @0
+    Other u32       @8
+    Addrs list<u32> @12
+}
+`
+	_, err := Parse("two.zap", []byte(src))
+	if err == nil {
+		t.Fatal("a struct declaring Addrs twice was accepted")
+	}
+	if want := "struct Two declares Addrs twice"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error does not name the repeat: %v", err)
+	}
+	// The line the SECOND one is on, which is where the fix goes.
+	if !strings.Contains(err.Error(), "two.zap:6") {
+		t.Errorf("error does not name the line: %v", err)
+	}
+}
+
+// TestTwoStructsMayShareAFieldName — the refusal is per struct. Every P-chain
+// transaction repeats the same eight envelope fields, so a rule that reached
+// across structs would refuse the schema this generator exists for.
+func TestTwoStructsMayShareAFieldName(t *testing.T) {
+	const src = `package p
+
+struct A {
+    Addrs list<u32> @0
+}
+
+struct B {
+    Addrs list<u32> @0
+}
+`
+	if _, err := Parse("two.zap", []byte(src)); err != nil {
+		t.Fatalf("two structs naming one field each were refused: %v", err)
+	}
+}

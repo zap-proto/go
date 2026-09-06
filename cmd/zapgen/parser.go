@@ -252,6 +252,17 @@ func (p *parser) parseStruct() (*Struct, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Two fields of one name is not a schema. Every backend turns a
+		// field into a name in its own language — a struct member, an
+		// accessor, a constant — and a repeat is a collision there rather
+		// than here: emitted source that will not compile, and a message
+		// no reader could describe. Refusing it in the front end says so
+		// once, for every language, at the line that wrote it.
+		for _, prior := range s.Fields {
+			if prior.Name == f.Name {
+				return nil, p.errf("struct %s declares %s twice", name, f.Name)
+			}
+		}
 		s.Fields = append(s.Fields, f)
 	}
 }
