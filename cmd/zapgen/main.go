@@ -127,8 +127,10 @@ func run(input, outDir, lang, runtimePath string, single bool, typeSuffix string
 	return write(outDir, files)
 }
 
-// writeRuntime puts the Rust runtime in dir and nothing else — what a crate
-// that holds the runtime for several schemas is generated from.
+// writeRuntime puts the message runtime in dir and nothing else — what a
+// crate that holds the runtime for several schemas is generated from. The
+// call runtime travels with an interface schema, which is the only thing
+// that calls it.
 func writeRuntime(dir string) error {
 	if dir == "" {
 		return fmt.Errorf("-runtime needs -out")
@@ -136,7 +138,7 @@ func writeRuntime(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return write(dir, map[string][]byte{"zap.rs": rustRuntime, "rpc.rs": rustCallRuntime})
+	return write(dir, map[string][]byte{"zap.rs": rustRuntime})
 }
 
 // write puts every emitted file in dir.
