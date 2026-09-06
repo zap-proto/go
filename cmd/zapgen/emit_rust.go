@@ -363,6 +363,13 @@ func emitRustList(w *bytes.Buffer, f *File, fld *Field) {
 	case f.PtrElem(fld.Type) != nil:
 		fmt.Fprintf(w, "    for at in &offs_%s {\n", name)
 		fmt.Fprintf(w, "        list_%s.add_object_ptr(b, *at);\n", name)
+	case fld.Type.ListElem.Kind == KindBytesFixed:
+		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
+		fmt.Fprintf(w, "        list_%s.add_bytes(b, elem);\n", name)
+	case fld.Type.ListElem.Kind == KindU8 || fld.Type.ListElem.Kind == KindU32 ||
+		fld.Type.ListElem.Kind == KindU64:
+		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
+		fmt.Fprintf(w, "        list_%s.add_%s(b, *elem);\n", name, rustScalarCall(fld.Type.ListElem.Kind))
 	case f.InlineElem(fld.Type) != nil:
 		// Inline elements lie end to end, so the count the pointer carries
 		// is the caller's own element count, not a byte total.
@@ -468,6 +475,12 @@ func rustInputType(f *File, t Type) string {
 			// The elements are written into this same buffer, so they
 			// arrive as values rather than as bytes.
 			return "&'a [" + elem.Name + "Input" + rustLife(elem) + "]"
+		}
+		switch t.ListElem.Kind {
+		case KindBytesFixed:
+			return fmt.Sprintf("&'a [[u8; %d]]", t.ListElem.FixedSize)
+		case KindU8, KindU32, KindU64:
+			return "&'a [" + rustScalar(t.ListElem.Kind) + "]"
 		}
 		// Each element arrives already written: a record for an inline
 		// element, its own message for one with a tail.

@@ -219,6 +219,15 @@ func validate(s *Struct) error {
 	}
 	owner := make([]string, size)
 	for _, f := range s.Fields {
+		if f.Type.Kind == KindList && f.Type.ListElem != nil {
+			switch f.Type.ListElem.Kind {
+			case KindU8, KindU32, KindU64, KindBytesFixed, KindStruct, KindPtr:
+			default:
+				return fmt.Errorf("struct %s field %s: a list of %s is not a shape the wire "+
+					"carries — an element is a u8, a u32, a u64, bytes_fixed[N], a struct, "+
+					"or ptr<T>", s.Name, f.Name, f.Type.ListElem.Kind)
+			}
+		}
 		if f.Type.Kind == KindPtr {
 			return fmt.Errorf("struct %s field %s: ptr<%s> names one element of a list; "+
 				"a field that holds one struct is already a pointer — write `%s %s`",
@@ -460,6 +469,13 @@ func emitList(w *bytes.Buffer, f *File, fld *Field) {
 	case f.PtrElem(fld.Type) != nil:
 		fmt.Fprintf(w, "\tfor _, at := range offs%s {\n", fld.Name)
 		fmt.Fprintf(w, "\t\t%s.AddObjectPtr(at)\n", listVar)
+	case fld.Type.ListElem.Kind == KindBytesFixed:
+		fmt.Fprintf(w, "\tfor _, elem := range in.%s {\n", fld.Name)
+		fmt.Fprintf(w, "\t\t%s.AddBytes(elem[:])\n", listVar)
+	case fld.Type.ListElem.Kind == KindU8 || fld.Type.ListElem.Kind == KindU32 ||
+		fld.Type.ListElem.Kind == KindU64:
+		fmt.Fprintf(w, "\tfor _, elem := range in.%s {\n", fld.Name)
+		fmt.Fprintf(w, "\t\t%s.Add%s(elem)\n", listVar, goAddName(fld.Type.ListElem.Kind))
 	case f.InlineElem(fld.Type) != nil:
 		// Inline elements lie end to end, so the count the pointer carries
 		// is the caller's own element count, not a byte total.
@@ -471,6 +487,19 @@ func emitList(w *bytes.Buffer, f *File, fld *Field) {
 	}
 	w.WriteString("\t}\n")
 	fmt.Fprintf(w, "\tat%s := %s.FinishOffset()\n", fld.Name, listVar)
+}
+
+// goAddName is the list appender for a scalar element kind.
+func goAddName(k TypeKind) string {
+	switch k {
+	case KindU8:
+		return "Uint8"
+	case KindU32:
+		return "Uint32"
+	case KindU64:
+		return "Uint64"
+	}
+	return ""
 }
 
 // goInputType returns the Go type used in the Input struct.
@@ -509,6 +538,16 @@ func goInputType(f *File, t Type) string {
 			// The elements are written into this same buffer, so they
 			// arrive as values rather than as bytes.
 			return "[]" + elem.Name + "Input"
+		}
+		switch t.ListElem.Kind {
+		case KindBytesFixed:
+			return fmt.Sprintf("[][%d]byte", t.ListElem.FixedSize)
+		case KindU8:
+			return "[]uint8"
+		case KindU32:
+			return "[]uint32"
+		case KindU64:
+			return "[]uint64"
 		}
 		// Each element arrives already written: a record for an inline
 		// element, its own message for one with a tail.
