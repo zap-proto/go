@@ -369,3 +369,41 @@ func BenchmarkBuild(b *testing.B) {
 		_ = builder.Finish()
 	}
 }
+
+// TestZeroObjectReadsAsZero pins the read side's totality at the one place it
+// used to fault: the zero Object, which is what Object() and List() answer for
+// a null or out-of-range pointer, and what a generated nested-struct accessor
+// hands back by value.
+func TestZeroObjectReadsAsZero(t *testing.T) {
+	var o Object
+	if !o.IsNull() {
+		t.Error("the zero Object should be null")
+	}
+	if o.Uint8(0) != 0 || o.Uint16(0) != 0 || o.Uint32(0) != 0 || o.Uint64(0) != 0 {
+		t.Error("the zero Object should read integers as 0")
+	}
+	if o.Bool(0) || o.Float32(0) != 0 || o.Float64(0) != 0 {
+		t.Error("the zero Object should read bool and floats as zero")
+	}
+	if o.Bytes(0) != nil || o.BytesFixed(0, 32) != nil || o.Text(0) != "" {
+		t.Error("the zero Object should read byte fields as empty")
+	}
+	if !o.Object(0).IsNull() || o.List(0).Len() != 0 {
+		t.Error("the zero Object should read pointer fields as null")
+	}
+
+	// And reached the way the wire reaches it: a message whose nested pointer
+	// is null hands back the zero Object, which must read as zero.
+	b := NewBuilder(64)
+	ob := b.StartObject(8)
+	ob.SetObject(0, 0)
+	ob.FinishAsRoot()
+	m, err := Parse(b.Finish())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	child := m.Root().Object(0)
+	if !child.IsNull() || child.Uint32(0) != 0 {
+		t.Error("a null nested pointer should read as a null object of zeros")
+	}
+}
