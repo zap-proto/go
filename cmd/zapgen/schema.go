@@ -99,6 +99,7 @@ const (
 	KindText       // variable-length UTF-8
 	KindList       // list<T>
 	KindStruct     // nested struct
+	KindPtr        // ptr<T>, a list element that names its struct elsewhere
 )
 
 // String returns the schema name of the kind. Used in error messages.
@@ -136,6 +137,8 @@ func (k TypeKind) String() string {
 		return "list"
 	case KindStruct:
 		return "struct"
+	case KindPtr:
+		return "ptr"
 	}
 	return "invalid"
 }
@@ -158,7 +161,7 @@ func (t Type) SlotSize() int {
 		return t.FixedSize
 	case KindBytes, KindText, KindList:
 		return 8
-	case KindStruct:
+	case KindStruct, KindPtr:
 		return 4
 	}
 	return 0
@@ -182,6 +185,16 @@ func (t Type) SlotSize() int {
 //
 // No annotation decides this and none could: a schema that had to be told
 // which shape it meant would be a schema that could be told wrong.
+//
+// A `ptr<T>` element is the third thing a chain writes and the one case the
+// element's own width cannot settle. It is four bytes where it lies — so the
+// list is a STRIDE list at four, and every bound a stride list has applies
+// unchanged — but those four bytes are a SIGNED offset from the slot holding
+// them to a T written elsewhere in the same buffer. A T with a tail can be
+// reached that way or written behind a length, and both are legal ZAP; only
+// the author knows which one the chain on the other side writes. So this
+// alone is spelled, and spelling it is the difference between reading the
+// X-chain's outputs and reading four bytes.
 func Resolve(f *File) error {
 	declared := make(map[string]*Struct, len(f.Structs))
 	for _, s := range f.Structs {
@@ -189,22 +202,35 @@ func Resolve(f *File) error {
 	}
 	for _, s := range f.Structs {
 		for _, fd := range s.Fields {
+			where := s.Name + " field " + fd.Name
+			// A struct named anywhere must be a struct this file declares.
+			// One schema is one closed set of names: a name from somewhere
+			// else reaches the emitted source as a type that is not there,
+			// and the author meets it as a compiler error in generated code
+			// they never wrote.
+			named := fd.Type.StructName
+			if fd.Type.Kind == KindList && fd.Type.ListElem != nil {
+				named = fd.Type.ListElem.StructName
+			}
+			if named != "" && declared[named] == nil {
+				return fmt.Errorf("%s names %s, which this schema does not declare", where, named)
+			}
+			if fd.Type.Kind == KindPtr {
+				return fmt.Errorf("%s: ptr<%s> names one element of a list; a field holding one struct is written %s",
+					where, fd.Type.StructName, fd.Type.StructName)
+			}
 			if fd.Type.Kind != KindList {
 				continue
 			}
 			elem := fd.Type.ListElem
 			if elem == nil {
-				return fmt.Errorf("struct %s field %s: list of nothing", s.Name, fd.Name)
+				return fmt.Errorf("%s: list of nothing", where)
 			}
 			if elem.Kind == KindList {
-				return fmt.Errorf("struct %s field %s: a list of lists has no shape on the wire", s.Name, fd.Name)
+				return fmt.Errorf("%s: a list of lists has no shape on the wire", where)
 			}
 			if elem.Kind == KindStruct {
-				es, ok := declared[elem.StructName]
-				if !ok {
-					return fmt.Errorf("struct %s field %s: list of undeclared struct %s", s.Name, fd.Name, elem.StructName)
-				}
-				if inline(es) {
+				if es := declared[elem.StructName]; inline(es) {
 					fd.Type.Stride = structSize(es)
 				}
 				continue
@@ -213,6 +239,58 @@ func Resolve(f *File) error {
 		}
 	}
 	return nil
+}
+
+// Named answers the struct a type names, and "" for one that names none. A
+// field names a struct three ways — as itself, as `list<T>`, or as the aim of
+// a `list<ptr<T>>` — and every place that has to reach the declaration wants
+// the same answer to the same question.
+func (t Type) Named() string {
+	switch t.Kind {
+	case KindStruct, KindPtr:
+		return t.StructName
+	case KindList:
+		if t.ListElem != nil {
+			return t.ListElem.Named()
+		}
+	}
+	return ""
+}
+
+// Shape is how a list holds one element, and it is the answer to the only
+// question a list asks. Resolve settles it in the front end so no two
+// backends can settle it differently.
+type Shape uint8
+
+const (
+	// Absent is not a list element at all.
+	Absent Shape = iota
+	// Strided elements are records at one width, laid end to end. Reaching
+	// element i is arithmetic: no byte of the list says where it is.
+	Strided
+	// Framed elements each sit behind a four-byte length, because nothing
+	// else can say where the next one starts.
+	Framed
+	// Aimed elements are four-byte signed offsets, each from the slot that
+	// holds it to the element written elsewhere in the same buffer. The run
+	// of offsets is itself Strided at four; what differs is only what the
+	// four bytes mean.
+	Aimed
+)
+
+// shapeOf answers how a list of the named struct carries it. A struct that is
+// all its own bytes is a record and rides at its width; one with a tail
+// cannot be copied into a run, so it rides behind a length.
+func shapeOf(f *File, name string) Shape {
+	for _, s := range f.Structs {
+		if s.Name == name {
+			if inline(s) {
+				return Strided
+			}
+			return Framed
+		}
+	}
+	return Absent
 }
 
 // inline reports whether a struct is entirely its own bytes — every field a
@@ -247,6 +325,8 @@ func width(t Type) int {
 		return 8
 	case KindBytesFixed:
 		return t.FixedSize
+	case KindPtr:
+		return 4
 	}
 	return 0
 }

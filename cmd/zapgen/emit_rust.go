@@ -190,7 +190,7 @@ func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
 		w.WriteString("    }\n")
 	case KindList:
 		elem := f.Type.ListElem
-		if elem.Kind == KindStruct {
+		if elem.Kind == KindStruct || elem.Kind == KindPtr {
 			// A typed element accessor: the list answers its own element
 			// type, so no caller is told again how wide a record is.
 			fmt.Fprintf(w, "    pub fn %s(&self) -> %sList<'a> {\n        %sList { l: %s }\n    }\n",
@@ -301,6 +301,21 @@ func emitRustTail(w *bytes.Buffer, f *Field) {
 	case KindList:
 		fmt.Fprintf(w, "    let mut at_%s = 0;\n", name)
 		fmt.Fprintf(w, "    if !input.%s.is_empty() {\n", name)
+		if f.Type.ListElem.Kind == KindPtr {
+			// The elements go down first and the run of offsets after, so
+			// every offset aims backward at bytes already written.
+			fmt.Fprintf(w, "        let mut aims = Vec::with_capacity(input.%s.len());\n", name)
+			fmt.Fprintf(w, "        for elem in input.%s {\n", name)
+			w.WriteString("            aims.push(b.embed(elem));\n")
+			w.WriteString("        }\n")
+			w.WriteString("        let mut lb = b.start_list();\n")
+			w.WriteString("        for at in &aims {\n")
+			w.WriteString("            lb.add_object_ptr(&mut b, *at);\n")
+			w.WriteString("        }\n")
+			fmt.Fprintf(w, "        at_%s = lb.finish_offset();\n", name)
+			w.WriteString("    }\n")
+			return
+		}
 		w.WriteString("        let mut lb = b.start_list();\n")
 		fmt.Fprintf(w, "        for elem in input.%s {\n", name)
 		if f.Type.Stride > 0 {
@@ -634,14 +649,18 @@ func rustIdent(s string) string {
 // beside the struct it holds. It is what retires `list.object(i, SIZE)` from
 // every caller: the width is stated once, by the generator that knows it.
 func emitRustList(w *bytes.Buffer, f *File, s *Struct) {
-	if !elements(f)[s.Name] {
+	shape := elements(f)[s.Name]
+	if shape == Absent {
 		return
 	}
 	prefix := screamCase(s.Name)
-	if inline(s) {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "/// A run of %s records, %s_SIZE bytes each.\n", s.Name, prefix)
-	} else {
+	case Framed:
 		fmt.Fprintf(w, "/// A run of %s entries, each behind its length.\n", s.Name)
+	case Aimed:
+		fmt.Fprintf(w, "/// A run of four-byte offsets, each aiming at one %s.\n", s.Name)
 	}
 	w.WriteString("#[derive(Clone, Copy, Debug)]\n")
 	fmt.Fprintf(w, "pub struct %sList<'a> {\n", s.Name)
@@ -654,10 +673,13 @@ func emitRustList(w *bytes.Buffer, f *File, s *Struct) {
 	w.WriteString("    pub fn is_empty(&self) -> bool {\n        self.l.len() == 0\n    }\n\n")
 	fmt.Fprintf(w, "    /// Element `i`, or the absent %s past the end.\n", s.Name)
 	fmt.Fprintf(w, "    pub fn at(&self, i: usize) -> %s<'a> {\n", s.Name)
-	if inline(s) {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "        %s::new(self.l.object(i, %s_SIZE))\n", s.Name, prefix)
-	} else {
+	case Framed:
 		fmt.Fprintf(w, "        %s::new(self.l.object_at(i))\n", s.Name)
+	case Aimed:
+		fmt.Fprintf(w, "        %s::new(self.l.object_ptr(i))\n", s.Name)
 	}
 	w.WriteString("    }\n")
 	w.WriteString("}\n\n")

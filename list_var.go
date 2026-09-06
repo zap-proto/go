@@ -46,3 +46,43 @@ func (lb *ListBuilder) AddObjectBytes(data []byte) {
 func (lb *ListBuilder) FinishOffset() int {
 	return lb.startPos
 }
+
+// ObjectPtr returns element i of a list of POINTERS: a 4-byte signed offset
+// from the element's own position, dereferenced exactly as Object.Object
+// does. The objects lie in the same buffer, written before the pointer run,
+// so the offsets are usually negative.
+func (l List) ObjectPtr(i int) Object {
+	if i < 0 || i >= l.length {
+		return Object{}
+	}
+	d := l.msg.data
+	pos := l.offset + i*4
+	if pos+4 > len(d) {
+		return Object{}
+	}
+	rel := int32(binary.LittleEndian.Uint32(d[pos:]))
+	if rel == 0 {
+		return Object{}
+	}
+	abs := pos + int(rel)
+	if abs < HeaderSize || abs >= len(d) {
+		return Object{}
+	}
+	return Object{msg: l.msg, offset: abs}
+}
+
+// AddObjectPtr appends one 4-byte SIGNED pointer to the object at target.
+// The element kind of a list whose members live elsewhere in the buffer:
+// they are written first and the pointer run after, so the offsets are
+// usually negative. Zero writes the null pointer.
+func (lb *ListBuilder) AddObjectPtr(target int) {
+	lb.b.grow(4)
+	p := lb.b.pos
+	v := uint32(0)
+	if target != 0 {
+		v = uint32(int32(target - p))
+	}
+	binary.LittleEndian.PutUint32(lb.b.buf[p:], v)
+	lb.b.pos = p + 4
+	lb.count++
+}

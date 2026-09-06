@@ -291,7 +291,7 @@ func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
 		w.WriteString("}\n")
 	case KindList:
 		elem := f.Type.ListElem
-		if elem.Kind == KindStruct {
+		if elem.Kind == KindStruct || elem.Kind == KindPtr {
 			// A typed element accessor: the list answers its own element
 			// type, so no caller is told again how wide a record is.
 			fmt.Fprintf(w, "func (t %s) %s() %sList { return %sList{l: %s} }\n",
@@ -460,6 +460,21 @@ func emitTail(w *bytes.Buffer, f *Field) {
 	case KindList:
 		fmt.Fprintf(w, "\t%s := 0\n", at)
 		fmt.Fprintf(w, "\tif len(in.%s) > 0 {\n", f.Name)
+		if f.Type.ListElem.Kind == KindPtr {
+			// The elements go down first and the run of offsets after, so
+			// every offset aims backward at bytes already written.
+			fmt.Fprintf(w, "\t\taims := make([]int, 0, len(in.%s))\n", f.Name)
+			fmt.Fprintf(w, "\t\tfor _, elem := range in.%s {\n", f.Name)
+			w.WriteString("\t\t\taims = append(aims, b.Embed(elem))\n")
+			w.WriteString("\t\t}\n")
+			fmt.Fprintf(w, "\t\tlb := b.StartList(%s)\n", goStrideOrZero(f.Type))
+			w.WriteString("\t\tfor _, aim := range aims {\n")
+			w.WriteString("\t\t\tlb.AddObjectPtr(aim)\n")
+			w.WriteString("\t\t}\n")
+			fmt.Fprintf(w, "\t\t%s = lb.FinishOffset()\n", at)
+			w.WriteString("\t}\n")
+			return
+		}
 		fmt.Fprintf(w, "\t\tlb := b.StartList(%s)\n", goStrideOrZero(f.Type))
 		fmt.Fprintf(w, "\t\tfor _, elem := range in.%s {\n", f.Name)
 		if f.Type.Stride > 0 {
@@ -729,12 +744,18 @@ func lowerFirst(s string) string {
 
 // elements names every struct some list in f holds, so a list type is emitted
 // for the structs that are elements and not for the ones that are not.
-func elements(f *File) map[string]bool {
-	held := make(map[string]bool)
+func elements(f *File) map[string]Shape {
+	held := make(map[string]Shape)
 	for _, s := range f.Structs {
 		for _, fd := range s.Fields {
-			if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
-				held[fd.Type.ListElem.StructName] = true
+			if fd.Type.Kind != KindList {
+				continue
+			}
+			switch e := fd.Type.ListElem; e.Kind {
+			case KindStruct:
+				held[e.StructName] = shapeOf(f, e.StructName)
+			case KindPtr:
+				held[e.StructName] = Aimed
 			}
 		}
 	}
@@ -745,28 +766,32 @@ func elements(f *File) map[string]bool {
 // the struct it holds. It is what retires `list.Object(i, SIZE)` from every
 // caller: the width is stated once, here, by the generator that knows it.
 func emitList(w *bytes.Buffer, f *File, s *Struct) {
-	if !elements(f)[s.Name] {
+	shape := elements(f)[s.Name]
+	if shape == Absent {
 		return
 	}
-	stride := 0
-	if inline(s) {
-		stride = structSize(s)
-	}
 	lower := lowerFirst(s.Name)
-	if stride > 0 {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "\n// %sList is a run of %s records, %sSize bytes each.\n", s.Name, s.Name, lower)
-	} else {
+	case Framed:
 		fmt.Fprintf(w, "\n// %sList is a run of %s entries, each behind its length.\n", s.Name, s.Name)
+	case Aimed:
+		fmt.Fprintf(w, "\n// %sList is a run of four-byte offsets, each aiming at one %s.\n", s.Name, s.Name)
 	}
 	fmt.Fprintf(w, "type %sList struct{ l zap.List }\n\n", s.Name)
 	fmt.Fprintf(w, "// Len is how many elements the list holds.\n")
 	fmt.Fprintf(w, "func (x %sList) Len() int { return x.l.Len() }\n\n", s.Name)
 	fmt.Fprintf(w, "// At is element i, or the absent %s past the end.\n", s.Name)
-	if stride > 0 {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.Object(i, %sSize)} }\n",
 			s.Name, s.Name, s.Name, lower)
-		return
+	case Framed:
+		fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.ObjectAt(i)} }\n",
+			s.Name, s.Name, s.Name)
+	case Aimed:
+		fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.ObjectPtr(i)} }\n",
+			s.Name, s.Name, s.Name)
 	}
-	fmt.Fprintf(w, "func (x %sList) At(i int) %s { return %s{o: x.l.ObjectAt(i)} }\n",
-		s.Name, s.Name, s.Name)
 }

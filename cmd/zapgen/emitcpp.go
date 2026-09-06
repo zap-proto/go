@@ -214,11 +214,8 @@ func writeCPPIncludes(w *bytes.Buffer, f *File, s *Struct) {
 		}
 	}
 	for _, fd := range s.Fields {
-		if fd.Type.Kind == KindStruct {
-			add(fd.Type.StructName)
-		}
-		if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
-			add(fd.Type.ListElem.StructName)
+		if n := fd.Type.Named(); n != "" {
+			add(n)
 		}
 	}
 	if len(names) == 0 {
@@ -261,11 +258,8 @@ func writeCPPForwards(w *bytes.Buffer, f *File, structs []*Struct) {
 	// definitions.
 	for _, s := range structs {
 		for _, fd := range s.Fields {
-			if fd.Type.Kind == KindStruct {
-				add(fd.Type.StructName)
-			}
-			if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
-				add(fd.Type.ListElem.StructName)
+			if n := fd.Type.Named(); n != "" {
+				add(n)
 			}
 		}
 	}
@@ -275,7 +269,7 @@ func writeCPPForwards(w *bytes.Buffer, f *File, structs []*Struct) {
 	held := elements(f)
 	for _, name := range names {
 		fmt.Fprintf(w, "class %s;\n", name)
-		if held[name] {
+		if held[name] != Absent {
 			fmt.Fprintf(w, "class %sList;\n", name)
 		}
 	}
@@ -295,13 +289,17 @@ func emitCPPStruct(w *bytes.Buffer, f *File, s *Struct) {
 // beside the struct it holds. It is what retires `list.object(i, SIZE)` from
 // every caller: the width is stated once, by the generator that knows it.
 func emitCPPList(w *bytes.Buffer, f *File, s *Struct) {
-	if !elements(f)[s.Name] {
+	shape := elements(f)[s.Name]
+	if shape == Absent {
 		return
 	}
-	if inline(s) {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "// %sList is a run of %s records, %s bytes each.\n", s.Name, s.Name, cppSizeName(s))
-	} else {
+	case Framed:
 		fmt.Fprintf(w, "// %sList is a run of %s entries, each behind its length.\n", s.Name, s.Name)
+	case Aimed:
+		fmt.Fprintf(w, "// %sList is a run of four-byte offsets, each aiming at one %s.\n", s.Name, s.Name)
 	}
 	fmt.Fprintf(w, "class %sList {\n", s.Name)
 	w.WriteString("  public:\n")
@@ -310,11 +308,15 @@ func emitCPPList(w *bytes.Buffer, f *File, s *Struct) {
 	w.WriteString("    // How many elements the list holds.\n")
 	w.WriteString("    std::int64_t size() const { return l_.size(); }\n")
 	fmt.Fprintf(w, "    // Element i, or the absent %s past the end.\n", s.Name)
-	if inline(s) {
+	switch shape {
+	case Strided:
 		fmt.Fprintf(w, "    %s at(std::int64_t i) const { return %s(l_.object(i, %s)); }\n",
 			cppTypeName(f, s.Name), cppTypeName(f, s.Name), cppSizeName(s))
-	} else {
+	case Framed:
 		fmt.Fprintf(w, "    %s at(std::int64_t i) const { return %s(l_.object_at(i)); }\n",
+			cppTypeName(f, s.Name), cppTypeName(f, s.Name))
+	case Aimed:
+		fmt.Fprintf(w, "    %s at(std::int64_t i) const { return %s(l_.object_ptr(i)); }\n",
 			cppTypeName(f, s.Name), cppTypeName(f, s.Name))
 	}
 	w.WriteString("\n  private:\n")
@@ -416,7 +418,7 @@ func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 		w.WriteString("    }\n")
 	case KindList:
 		elem := f.Type.ListElem
-		if elem.Kind == KindStruct {
+		if elem.Named() != "" {
 			// A typed element accessor: the list answers its own element
 			// type. Declared here, defined out of line once every class
 			// exists, for the reason a nested accessor is.
@@ -450,9 +452,9 @@ func emitCPPOutOfLine(w *bytes.Buffer, file *File, structs []*Struct) {
 				name := cppTypeName(file, f.Type.StructName)
 				fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
 					name, s.Name, f.Name, name, cppOffsetName(s, f))
-			case f.Type.Kind == KindList && f.Type.ListElem.Kind == KindStruct:
+			case f.Type.Kind == KindList && f.Type.ListElem.Named() != "":
 				open()
-				name := cppTypeName(file, f.Type.ListElem.StructName) + "List"
+				name := cppTypeName(file, f.Type.ListElem.Named()) + "List"
 				fmt.Fprintf(w, "inline %s %s::%s() const { return %s(%s); }\n",
 					name, s.Name, f.Name, name, cppListRead(cppOffsetName(s, f), f.Type))
 			}
@@ -603,6 +605,22 @@ func emitCPPTail(w *bytes.Buffer, s *Struct, f *Field) {
 	case KindList:
 		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", at)
 		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
+		if f.Type.ListElem.Kind == KindPtr {
+			// The elements go down first and the run of offsets after, so
+			// every offset aims backward at bytes already written.
+			w.WriteString("        std::vector<std::int64_t> aims;\n")
+			fmt.Fprintf(w, "        aims.reserve(in.%s.size());\n", f.Name)
+			fmt.Fprintf(w, "        for (const auto& elem : in.%s) {\n", f.Name)
+			w.WriteString("            aims.push_back(b.embed(elem));\n")
+			w.WriteString("        }\n")
+			fmt.Fprintf(w, "        auto lb = b.start_list(%s);\n", cppStrideOrZero(f.Type))
+			w.WriteString("        for (const std::int64_t aim : aims) {\n")
+			w.WriteString("            lb.add_object_ptr(aim);\n")
+			w.WriteString("        }\n")
+			fmt.Fprintf(w, "        %s = lb.finish().first;\n", at)
+			w.WriteString("    }\n")
+			return
+		}
 		fmt.Fprintf(w, "        auto lb = b.start_list(%s);\n", cppStrideOrZero(f.Type))
 		fmt.Fprintf(w, "        for (const auto& elem : in.%s) {\n", f.Name)
 		if f.Type.Stride > 0 {

@@ -487,6 +487,36 @@ impl<'a> List<'a> {
         }
     }
 
+    /// Element `i` of a list of POINTERS: four bytes read as a SIGNED offset
+    /// from the slot holding them to an object written elsewhere in the same
+    /// buffer. The objects go down first and the run of offsets after, so the
+    /// offsets are usually negative. Zero is the absent element.
+    ///
+    /// The run itself is a stride list at four, which is why the count was
+    /// already bounded before any of this: the only thing added here is what
+    /// the four bytes mean.
+    pub fn object_ptr(&self, i: usize) -> Object<'a> {
+        if i >= self.length {
+            return Object::null();
+        }
+        let pos = self.offset + i * 4;
+        if pos + 4 > self.data.len() {
+            return Object::null();
+        }
+        let rel = i32::from_le_bytes(self.data[pos..pos + 4].try_into().unwrap());
+        if rel == 0 {
+            return Object::null();
+        }
+        let abs = pos as i64 + rel as i64;
+        if abs < HEADER_SIZE as i64 || abs >= self.data.len() as i64 {
+            return Object::null();
+        }
+        Object {
+            data: self.data,
+            offset: abs as usize,
+        }
+    }
+
     /// Walk a variable-element list once, in order. `f` answers false to stop.
     /// The walk stops at the declared count or at the first entry that would
     /// read past the buffer, whichever comes first — the same place
@@ -884,6 +914,21 @@ impl ListBuilder {
     pub fn add_u32(&mut self, b: &mut Builder, v: u32) {
         b.grow(4);
         let p = b.pos;
+        b.buf[p..p + 4].copy_from_slice(&v.to_le_bytes());
+        b.pos = p + 4;
+        self.count += 1;
+    }
+
+    /// Append one four-byte SIGNED pointer aimed at the object at `target`.
+    /// Zero writes the absent element.
+    pub fn add_object_ptr(&mut self, b: &mut Builder, target: usize) {
+        b.grow(4);
+        let p = b.pos;
+        let v: u32 = if target == 0 {
+            0
+        } else {
+            ((target as i64 - p as i64) as i32) as u32
+        };
         b.buf[p..p + 4].copy_from_slice(&v.to_le_bytes());
         b.pos = p + 4;
         self.count += 1;

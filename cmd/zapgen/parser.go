@@ -402,6 +402,23 @@ func (p *parser) parseType() (Type, error) {
 		}
 		return Type{Kind: KindList, ListElem: &inner}, nil
 	}
+	if p.peekKeyword("ptr") {
+		p.pos += len("ptr")
+		p.skipSpace()
+		if err := p.expect("<"); err != nil {
+			return Type{}, err
+		}
+		p.skipSpace()
+		name, ok := p.readIdent()
+		if !ok {
+			return Type{}, p.errf("expected a struct name inside ptr<>")
+		}
+		p.skipSpace()
+		if err := p.expect(">"); err != nil {
+			return Type{}, err
+		}
+		return Type{Kind: KindPtr, StructName: name}, nil
+	}
 	if p.peekKeyword("bytes_fixed") {
 		p.pos += len("bytes_fixed")
 		p.skipSpace()
