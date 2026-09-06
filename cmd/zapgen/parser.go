@@ -277,6 +277,19 @@ func (p *parser) parseStruct() (*Struct, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A field may not repeat its struct's name. The accessor a backend
+		// prints for it would then be a member named as the type is, which
+		// C++ reads as a constructor and refuses; in the other two it merely
+		// reads as a thing named twice. One rule here beats one rule per
+		// backend, and the cost of it is a better field name.
+		if f.Name == name {
+			return nil, p.errf("struct %s: field %s repeats the struct's name", name, f.Name)
+		}
+		for _, prior := range s.Fields {
+			if prior.Name == f.Name {
+				return nil, p.errf("struct %s: duplicate field %s", name, f.Name)
+			}
+		}
 		s.Fields = append(s.Fields, f)
 	}
 }

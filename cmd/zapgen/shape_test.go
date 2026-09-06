@@ -180,3 +180,27 @@ struct S {
 		t.Error("Go output does not take the last segment as the package name")
 	}
 }
+
+// A field named as its struct is refused, because the accessor a backend
+// prints for it is a member named as the type is — which C++ reads as a
+// constructor. Caught once, in the front end, rather than once per backend.
+func TestAFieldMayNotRepeatItsStructsName(t *testing.T) {
+	_, err := Parse("x.zap", []byte("package p\nstruct Hash {\n  Kind u8 @0\n  Hash bytes_fixed[32] @1\n}\n"))
+	if err == nil {
+		t.Fatal("a field named as its struct was accepted")
+	}
+	if !strings.Contains(err.Error(), "repeats the struct's name") {
+		t.Fatalf("error does not say what is wrong: %v", err)
+	}
+}
+
+// Two fields of one name would print one accessor twice.
+func TestTwoFieldsOfOneNameAreRefused(t *testing.T) {
+	_, err := Parse("x.zap", []byte("package p\nstruct S {\n  A u8 @0\n  A u8 @1\n}\n"))
+	if err == nil {
+		t.Fatal("a duplicate field name was accepted")
+	}
+	if !strings.Contains(err.Error(), "duplicate field") {
+		t.Fatalf("error does not say what is wrong: %v", err)
+	}
+}
