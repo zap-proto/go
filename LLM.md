@@ -13,9 +13,12 @@ Import path: `github.com/zap-proto/go`. Package name: `zap`.
 Three sibling packages ship alongside the root codec:
 
 - `cmd/zapgen` — the schema compiler. Emits per-struct zero-copy
-  View/Builder Go AND, for every `interface` declaration, a typed RPC
+  View/Builder code AND, for every `interface` declaration, a typed RPC
   client + an abstract ordinal-dispatch server contract + a 1-based
   method-ordinal table. Brace and whitespace-significant DSL, one parser.
+  `-lang go` (default) emits Go against this runtime; `-lang cpp` emits
+  headers against `github.com/zap-proto/cpp`. One front end, one schema
+  model, one emitter per language.
 - `rpc` — the ZAP call envelope (`BuildRequest`/`ParseRequest`,
   `BuildResponse`/`ParseResponse`, `Call`, `Response`, status codes). The
   wire contract the generated client/server ride; byte-compatible with the
@@ -49,9 +52,45 @@ runtimes implementing that spec.
 
 `github.com/zap-proto/go/cmd/zapgen` — shipped and tested. It parses
 `.zap` schemas (brace + whitespace forms, one parser via `desugar.go`)
-and emits Go: per-struct View/Builder, and per-`interface` a typed RPC
+and emits, per struct, a View/Builder, and per `interface` a typed RPC
 client + abstract dispatch server + 1-based ordinal table over the `rpc`
-envelope. Drop a `//go:generate zapgen schema.zap` line in the consuming
+envelope.
+
+### The read side is total
+
+An out-of-range read answers zero rather than faulting, which is what lets a
+hostile buffer go straight to a typed accessor with no validation pass in
+front of it. That has to hold for the zero `Object` too — a null pointer
+field resolves to it, and a generated accessor returns it BY VALUE, so a
+caller has no way to test for it before reading. `Object.data()` in `zap.go`
+is where that is now true; before it, exactly the case a hostile or truncated
+buffer steers a reader to was the one that panicked.
+
+### Backends
+
+`-lang` picks what gets printed; everything before that is shared.
+`parser.go`, `desugar.go` and `schema.go` are the front end, `validate`
+and `structSize` the shared rules, and `emit.go` / `emitcpp.go` the two
+emitters. Adding a language is adding a case to `backend()` in `main.go`
+and an emitter beside those two — never a second parser, which is the
+thing that let the Rust and C++ chains hand-write their wire in the first
+place.
+
+| `-lang` | output | runtime it calls |
+|---------|--------|------------------|
+| `go`    | `<struct>_zap.go`  | `github.com/zap-proto/go` |
+| `cpp`   | `<struct>_zap.hpp` | `github.com/zap-proto/cpp` |
+
+The two are held byte-for-byte by `conformance/run.sh` — see
+`conformance/README.md`. Two places where saying nothing would have made
+them differ, both now pinned by a test:
+
+- **The wire version is spelled, not defaulted.** `zap.NewBuilder` writes
+  version 1 and `zap::Builder` writes version 2, so the generated C++ names
+  `zap::kVersion1`.
+- **A `bytes_fixed[N]` field is always N bytes.** Go's `[N]byte` answers N
+  zeros for a buffer too short to hold it, so the C++ span accessor answers
+  a zero span of length N rather than an empty one. Drop a `//go:generate zapgen schema.zap` line in the consuming
 package; `examples/echo` is a worked end-to-end demo (generated code +
 in-memory client/server round-trip test).
 
@@ -159,7 +198,8 @@ schema.go      Type, Struct, Field, Schema, StructBuilder — reflection
 rpc/           Call envelope (BuildRequest/ParseRequest/Build/ParseResponse)
                + promise pipelining (Session, Pipeliner) — pipeline.go
 cap/           Capability runtime: Issue/Attenuate/Verify/VerifyChain/Revoke
-cmd/zapgen/    Schema compiler: parser + desugar + struct & interface emit
+cmd/zapgen/    Schema compiler: parser + desugar + Go emitter + C++ emitter
+conformance/   The two backends compared on real bytes (run.sh)
 *_test.go      Unit tests, fuzzers, benchmarks
 examples/      Self-contained demos (agents mesh; echo RPC service)
 ```
@@ -169,9 +209,10 @@ examples/      Self-contained demos (agents mesh; echo RPC service)
 ```bash
 go build ./...
 go test ./...
+conformance/run.sh path/to/vectors.tsv   # needs a C++23 compiler
 ```
 
-Both must pass clean — no skipped tests, no expected failures.
+All must pass clean — no skipped tests, no expected failures.
 
 ## Runtime consolidation with luxfi/zap
 
