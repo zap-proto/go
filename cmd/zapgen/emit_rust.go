@@ -45,10 +45,14 @@ func EmitRust(f *File, runtimePath string) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string][]byte{
-		rustModuleName(f): body,
-		"zap.rs":          rustRuntime,
+	out := map[string][]byte{rustModuleName(f): body}
+	if runtimePath != defaultRustRuntime {
+		// The runtime lives in the crate the caller named, which already
+		// holds it. A second copy beside the module would be a second
+		// runtime that compiles.
+		return out, nil
 	}
+	out["zap.rs"] = rustRuntime
 	if len(f.Interfaces) > 0 {
 		out["rpc.rs"] = rustCallRuntime
 	}

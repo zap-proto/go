@@ -29,10 +29,22 @@ func main() {
 		suffix  = flag.String("type-suffix", "", "append SUFFIX to every generated type name (e.g. -type-suffix=View)")
 		lang    = flag.String("lang", "go", "output language: go or rust")
 		runtime = flag.String("rust-runtime", defaultRustRuntime, "Rust module path holding zap.rs and rpc.rs")
+		only    = flag.Bool("runtime", false, "write the Rust runtime alone, with no schema")
 	)
 	flag.Usage = usage
 	flag.Parse()
 
+	if *only {
+		if flag.NArg() != 0 || *lang != "rust" {
+			usage()
+			os.Exit(2)
+		}
+		if err := writeRuntime(*outDir); err != nil {
+			fmt.Fprintf(os.Stderr, "zapgen: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if flag.NArg() != 1 {
 		usage()
 		os.Exit(2)
@@ -51,10 +63,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Reads a .zap schema and emits one <struct>_zap.go file per struct.")
 	fmt.Fprintln(os.Stderr, "With -single, emits one combined <SCHEMA>_zap.go file.")
 	fmt.Fprintln(os.Stderr, "With -type-suffix, appends SUFFIX to every generated type name.")
-	fmt.Fprintln(os.Stderr, "With -lang rust, emits one <SCHEMA>_zap.rs module plus the")
-	fmt.Fprintln(os.Stderr, "runtime it calls (zap.rs, and rpc.rs for a schema with an")
-	fmt.Fprintln(os.Stderr, "interface). Rust compiles by module, so there is no per-struct")
-	fmt.Fprintln(os.Stderr, "form and -single is implied.")
+	fmt.Fprintln(os.Stderr, "With -lang rust, emits one <SCHEMA>_zap.rs module. Rust compiles by")
+	fmt.Fprintln(os.Stderr, "module, so there is no per-struct form and -single is implied. The")
+	fmt.Fprintln(os.Stderr, "runtime it calls travels beside it unless -rust-runtime names a crate")
+	fmt.Fprintln(os.Stderr, "that already holds it; `-lang rust -runtime` writes that crate's copy.")
 }
 
 func run(input, outDir, lang, runtimePath string, single bool, typeSuffix string) error {
@@ -113,6 +125,18 @@ func run(input, outDir, lang, runtimePath string, single bool, typeSuffix string
 		return err
 	}
 	return write(outDir, files)
+}
+
+// writeRuntime puts the Rust runtime in dir and nothing else — what a crate
+// that holds the runtime for several schemas is generated from.
+func writeRuntime(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("-runtime needs -out")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return write(dir, map[string][]byte{"zap.rs": rustRuntime, "rpc.rs": rustCallRuntime})
 }
 
 // write puts every emitted file in dir.
