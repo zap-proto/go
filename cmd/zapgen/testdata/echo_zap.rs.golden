@@ -61,12 +61,29 @@ impl Default for PingInput {
     }
 }
 
+/// Ping as the PING_SIZE bytes one element of a list holds.
+pub fn pack_ping(input: &PingInput) -> [u8; PING_SIZE] {
+    let mut r = [0u8; PING_SIZE];
+    r[PING_SEQ..PING_SEQ + 8].copy_from_slice(&input.seq.to_le_bytes());
+    r
+}
+
+/// Write a Ping into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_ping(b: &mut zap::Builder, input: &PingInput) -> usize {
+    let mut ob = b.start_object(PING_SIZE);
+    ob.set_u64(b, PING_SEQ, input.seq);
+    ob.finish(b)
+}
+
 /// Write a Ping message and answer its bytes.
 pub fn new_ping(input: &PingInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(PING_SIZE);
-    ob.set_u64(&mut b, PING_SEQ, input.seq);
-    ob.finish_as_root(&mut b);
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_ping(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 
@@ -119,12 +136,29 @@ impl Default for PongInput {
     }
 }
 
+/// Pong as the PONG_SIZE bytes one element of a list holds.
+pub fn pack_pong(input: &PongInput) -> [u8; PONG_SIZE] {
+    let mut r = [0u8; PONG_SIZE];
+    r[PONG_SEQ..PONG_SEQ + 8].copy_from_slice(&input.seq.to_le_bytes());
+    r
+}
+
+/// Write a Pong into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_pong(b: &mut zap::Builder, input: &PongInput) -> usize {
+    let mut ob = b.start_object(PONG_SIZE);
+    ob.set_u64(b, PONG_SEQ, input.seq);
+    ob.finish(b)
+}
+
 /// Write a Pong message and answer its bytes.
 pub fn new_pong(input: &PongInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(PONG_SIZE);
-    ob.set_u64(&mut b, PONG_SEQ, input.seq);
-    ob.finish_as_root(&mut b);
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_pong(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 

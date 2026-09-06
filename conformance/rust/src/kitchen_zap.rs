@@ -67,13 +67,23 @@ impl<'a> Default for LeafInput<'a> {
     }
 }
 
+/// Write a Leaf into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_leaf(b: &mut zap::Builder, input: &LeafInput<'_>) -> usize {
+    let mut ob = b.start_object(LEAF_SIZE);
+    ob.set_u32(b, LEAF_TAG, input.tag);
+    ob.set_text(b, LEAF_NOTE, input.note);
+    ob.finish(b)
+}
+
 /// Write a Leaf message and answer its bytes.
 pub fn new_leaf(input: &LeafInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(LEAF_SIZE);
-    ob.set_u32(&mut b, LEAF_TAG, input.tag);
-    ob.set_text(&mut b, LEAF_NOTE, input.note);
-    ob.finish_as_root(&mut b);
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_leaf(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 
@@ -186,6 +196,11 @@ impl<'a> All<'a> {
         self.o.list(ALL_ITEMS)
     }
 
+    /// Element `i` of `items`. Out of range answers the zero view.
+    pub fn items_at(&self, i: usize) -> Leaf<'a> {
+        Leaf::new(self.o.list(ALL_ITEMS).object_at(i))
+    }
+
     pub fn inner(&self) -> Leaf<'a> {
         Leaf::new(self.o.object(ALL_INNER))
     }
@@ -235,32 +250,43 @@ impl<'a> Default for AllInput<'a> {
     }
 }
 
-/// Write a All message and answer its bytes.
-pub fn new_all(input: &AllInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(ALL_SIZE);
-    ob.set_bool(&mut b, ALL_FLAG, input.flag);
-    ob.set_u8(&mut b, ALL_A8, input.a8);
-    ob.set_u16(&mut b, ALL_A16, input.a16);
-    ob.set_u32(&mut b, ALL_A32, input.a32);
-    ob.set_u64(&mut b, ALL_A64, input.a64);
-    ob.set_i8(&mut b, ALL_S8, input.s8);
-    ob.set_i16(&mut b, ALL_S16, input.s16);
-    ob.set_i32(&mut b, ALL_S32, input.s32);
-    ob.set_i64(&mut b, ALL_S64, input.s64);
-    ob.set_f32(&mut b, ALL_F32, input.f32);
-    ob.set_f64(&mut b, ALL_F64, input.f64);
-    ob.set_text(&mut b, ALL_NAME, input.name);
-    ob.set_bytes(&mut b, ALL_BLOB, input.blob);
-    ob.set_bytes_fixed(&mut b, ALL_ID, input.id);
+/// Write a All into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_all(b: &mut zap::Builder, input: &AllInput<'_>) -> usize {
+    let at_inner = b.embed(input.inner);
     let mut list_items = b.start_list();
     for elem in input.items {
-        list_items.add_object_bytes(&mut b, elem);
+        list_items.add_object_bytes(b, elem);
     }
-    ob.set_list(&mut b, ALL_ITEMS, list_items.finish_offset(), input.items.len());
-    let at_inner = b.embed(input.inner);
-    ob.set_object(&mut b, ALL_INNER, at_inner);
-    ob.finish_as_root(&mut b);
+    let at_items = list_items.finish_offset();
+    let mut ob = b.start_object(ALL_SIZE);
+    ob.set_bool(b, ALL_FLAG, input.flag);
+    ob.set_u8(b, ALL_A8, input.a8);
+    ob.set_u16(b, ALL_A16, input.a16);
+    ob.set_u32(b, ALL_A32, input.a32);
+    ob.set_u64(b, ALL_A64, input.a64);
+    ob.set_i8(b, ALL_S8, input.s8);
+    ob.set_i16(b, ALL_S16, input.s16);
+    ob.set_i32(b, ALL_S32, input.s32);
+    ob.set_i64(b, ALL_S64, input.s64);
+    ob.set_f32(b, ALL_F32, input.f32);
+    ob.set_f64(b, ALL_F64, input.f64);
+    ob.set_text(b, ALL_NAME, input.name);
+    ob.set_bytes(b, ALL_BLOB, input.blob);
+    ob.set_bytes_fixed(b, ALL_ID, input.id);
+    ob.set_list(b, ALL_ITEMS, at_items, input.items.len());
+    ob.set_object(b, ALL_INNER, at_inner);
+    ob.finish(b)
+}
+
+/// Write a All message and answer its bytes.
+pub fn new_all(input: &AllInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_all(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 

@@ -74,14 +74,24 @@ impl<'a> Default for SignedInput<'a> {
     }
 }
 
+/// Write a Signed into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_signed(b: &mut zap::Builder, input: &SignedInput<'_>) -> usize {
+    let mut ob = b.start_object(SIGNED_SIZE);
+    ob.set_bytes(b, SIGNED_UNSIGNED, input.unsigned);
+    ob.set_u32(b, SIGNED_CREDENTIAL_COUNT, input.credential_count);
+    ob.set_bytes(b, SIGNED_CREDENTIAL_BYTES, input.credential_bytes);
+    ob.finish(b)
+}
+
 /// Write a Signed message and answer its bytes.
 pub fn new_signed(input: &SignedInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(SIGNED_SIZE);
-    ob.set_bytes(&mut b, SIGNED_UNSIGNED, input.unsigned);
-    ob.set_u32(&mut b, SIGNED_CREDENTIAL_COUNT, input.credential_count);
-    ob.set_bytes(&mut b, SIGNED_CREDENTIAL_BYTES, input.credential_bytes);
-    ob.finish_as_root(&mut b);
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_signed(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 
@@ -135,8 +145,18 @@ impl<'a> Base<'a> {
         self.o.list(BASE_OUTS)
     }
 
+    /// Element `i` of `outs`. Out of range answers the zero view.
+    pub fn outs_at(&self, i: usize) -> Ptr<'a> {
+        Ptr::new(self.o.list(BASE_OUTS).object(i, PTR_SIZE))
+    }
+
     pub fn ins(&self) -> zap::List<'a> {
         self.o.list(BASE_INS)
+    }
+
+    /// Element `i` of `ins`. Out of range answers the zero view.
+    pub fn ins_at(&self, i: usize) -> Ptr<'a> {
+        Ptr::new(self.o.list(BASE_INS).object(i, PTR_SIZE))
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -166,24 +186,36 @@ impl<'a> Default for BaseInput<'a> {
     }
 }
 
-/// Write a Base message and answer its bytes.
-pub fn new_base(input: &BaseInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(BASE_SIZE);
-    ob.set_u32(&mut b, BASE_NETWORK_ID, input.network_id);
-    ob.set_bytes_fixed(&mut b, BASE_BLOCKCHAIN_ID, input.blockchain_id);
+/// Write a Base into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_base(b: &mut zap::Builder, input: &BaseInput<'_>) -> usize {
     let mut list_outs = b.start_list();
     for elem in input.outs {
-        list_outs.add_object_bytes(&mut b, elem);
+        list_outs.add_bytes(b, elem);
     }
-    ob.set_list(&mut b, BASE_OUTS, list_outs.finish_offset(), input.outs.len());
+    let at_outs = list_outs.finish_offset();
     let mut list_ins = b.start_list();
     for elem in input.ins {
-        list_ins.add_object_bytes(&mut b, elem);
+        list_ins.add_bytes(b, elem);
     }
-    ob.set_list(&mut b, BASE_INS, list_ins.finish_offset(), input.ins.len());
-    ob.set_bytes(&mut b, BASE_MEMO, input.memo);
-    ob.finish_as_root(&mut b);
+    let at_ins = list_ins.finish_offset();
+    let mut ob = b.start_object(BASE_SIZE);
+    ob.set_u32(b, BASE_NETWORK_ID, input.network_id);
+    ob.set_bytes_fixed(b, BASE_BLOCKCHAIN_ID, input.blockchain_id);
+    ob.set_list(b, BASE_OUTS, at_outs, input.outs.len());
+    ob.set_list(b, BASE_INS, at_ins, input.ins.len());
+    ob.set_bytes(b, BASE_MEMO, input.memo);
+    ob.finish(b)
+}
+
+/// Write a Base message and answer its bytes.
+pub fn new_base(input: &BaseInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_base(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 
@@ -236,12 +268,29 @@ impl Default for PtrInput {
     }
 }
 
+/// Ptr as the PTR_SIZE bytes one element of a list holds.
+pub fn pack_ptr(input: &PtrInput) -> [u8; PTR_SIZE] {
+    let mut r = [0u8; PTR_SIZE];
+    r[PTR_OFFSET..PTR_OFFSET + 4].copy_from_slice(&input.offset.to_le_bytes());
+    r
+}
+
+/// Write a Ptr into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_ptr(b: &mut zap::Builder, input: &PtrInput) -> usize {
+    let mut ob = b.start_object(PTR_SIZE);
+    ob.set_u32(b, PTR_OFFSET, input.offset);
+    ob.finish(b)
+}
+
 /// Write a Ptr message and answer its bytes.
 pub fn new_ptr(input: &PtrInput) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(PTR_SIZE);
-    ob.set_u32(&mut b, PTR_OFFSET, input.offset);
-    ob.finish_as_root(&mut b);
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_ptr(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 
@@ -308,6 +357,11 @@ impl<'a> Block<'a> {
         self.o.list(BLOCK_TX_LENGTHS)
     }
 
+    /// Element `i` of `tx_lengths`. Out of range answers the zero view.
+    pub fn tx_lengths_at(&self, i: usize) -> Ptr<'a> {
+        Ptr::new(self.o.list(BLOCK_TX_LENGTHS).object(i, PTR_SIZE))
+    }
+
     pub fn tx_blob(&self) -> &'a [u8] {
         self.o.bytes(BLOCK_TX_BLOB)
     }
@@ -337,21 +391,32 @@ impl<'a> Default for BlockInput<'a> {
     }
 }
 
-/// Write a Block message and answer its bytes.
-pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(BLOCK_SIZE);
-    ob.set_bytes_fixed(&mut b, BLOCK_PARENT, input.parent);
-    ob.set_u64(&mut b, BLOCK_HEIGHT, input.height);
-    ob.set_u64(&mut b, BLOCK_TIME, input.time);
-    ob.set_bytes_fixed(&mut b, BLOCK_ROOT, input.root);
+/// Write a Block into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_block(b: &mut zap::Builder, input: &BlockInput<'_>) -> usize {
     let mut list_tx_lengths = b.start_list();
     for elem in input.tx_lengths {
-        list_tx_lengths.add_object_bytes(&mut b, elem);
+        list_tx_lengths.add_bytes(b, elem);
     }
-    ob.set_list(&mut b, BLOCK_TX_LENGTHS, list_tx_lengths.finish_offset(), input.tx_lengths.len());
-    ob.set_bytes(&mut b, BLOCK_TX_BLOB, input.tx_blob);
-    ob.finish_as_root(&mut b);
+    let at_tx_lengths = list_tx_lengths.finish_offset();
+    let mut ob = b.start_object(BLOCK_SIZE);
+    ob.set_bytes_fixed(b, BLOCK_PARENT, input.parent);
+    ob.set_u64(b, BLOCK_HEIGHT, input.height);
+    ob.set_u64(b, BLOCK_TIME, input.time);
+    ob.set_bytes_fixed(b, BLOCK_ROOT, input.root);
+    ob.set_list(b, BLOCK_TX_LENGTHS, at_tx_lengths, input.tx_lengths.len());
+    ob.set_bytes(b, BLOCK_TX_BLOB, input.tx_blob);
+    ob.finish(b)
+}
+
+/// Write a Block message and answer its bytes.
+pub fn new_block(input: &BlockInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_block(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 

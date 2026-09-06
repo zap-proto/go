@@ -48,23 +48,33 @@ type BaseTxInput struct {
 	Memo         []byte
 }
 
-// NewBaseTx builds a ZAP-encoded BaseTx message from in and returns the bytes.
-func NewBaseTx(in BaseTxInput) []byte {
-	b := zap.NewBuilder(256)
-	ob := b.StartObject(baseTxSize)
-	ob.SetUint32(baseTxNetworkIDOff, in.NetworkID)
-	ob.SetBytesFixed(baseTxBlockchainIDOff, in.BlockchainID[:])
+// PutBaseTx writes a BaseTx into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutBaseTx(b *zap.Builder, in BaseTxInput) int {
 	outsLB := b.StartList(0)
 	for _, elem := range in.Outs {
 		outsLB.AddObjectBytes(elem)
 	}
-	ob.SetList(baseTxOutsOff, outsLB.FinishOffset(), len(in.Outs))
+	atOuts := outsLB.FinishOffset()
 	insLB := b.StartList(0)
 	for _, elem := range in.Ins {
 		insLB.AddObjectBytes(elem)
 	}
-	ob.SetList(baseTxInsOff, insLB.FinishOffset(), len(in.Ins))
+	atIns := insLB.FinishOffset()
+	ob := b.StartObject(baseTxSize)
+	ob.SetUint32(baseTxNetworkIDOff, in.NetworkID)
+	ob.SetBytesFixed(baseTxBlockchainIDOff, in.BlockchainID[:])
+	ob.SetList(baseTxOutsOff, atOuts, len(in.Outs))
+	ob.SetList(baseTxInsOff, atIns, len(in.Ins))
 	ob.SetBytes(baseTxMemoOff, in.Memo)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewBaseTx builds a ZAP-encoded BaseTx message from in and returns the bytes.
+func NewBaseTx(in BaseTxInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutBaseTx(b, in))
 	return b.Finish()
 }

@@ -92,24 +92,36 @@ impl<'a> Default for BaseTxInput<'a> {
     }
 }
 
-/// Write a BaseTx message and answer its bytes.
-pub fn new_base_tx(input: &BaseTxInput<'_>) -> Vec<u8> {
-    let mut b = zap::Builder::new(256);
-    let mut ob = b.start_object(BASE_TX_SIZE);
-    ob.set_u32(&mut b, BASE_TX_NETWORK_ID, input.network_id);
-    ob.set_bytes_fixed(&mut b, BASE_TX_BLOCKCHAIN_ID, input.blockchain_id);
+/// Write a BaseTx into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_base_tx(b: &mut zap::Builder, input: &BaseTxInput<'_>) -> usize {
     let mut list_outs = b.start_list();
     for elem in input.outs {
-        list_outs.add_object_bytes(&mut b, elem);
+        list_outs.add_object_bytes(b, elem);
     }
-    ob.set_list(&mut b, BASE_TX_OUTS, list_outs.finish_offset(), input.outs.len());
+    let at_outs = list_outs.finish_offset();
     let mut list_ins = b.start_list();
     for elem in input.ins {
-        list_ins.add_object_bytes(&mut b, elem);
+        list_ins.add_object_bytes(b, elem);
     }
-    ob.set_list(&mut b, BASE_TX_INS, list_ins.finish_offset(), input.ins.len());
-    ob.set_bytes(&mut b, BASE_TX_MEMO, input.memo);
-    ob.finish_as_root(&mut b);
+    let at_ins = list_ins.finish_offset();
+    let mut ob = b.start_object(BASE_TX_SIZE);
+    ob.set_u32(b, BASE_TX_NETWORK_ID, input.network_id);
+    ob.set_bytes_fixed(b, BASE_TX_BLOCKCHAIN_ID, input.blockchain_id);
+    ob.set_list(b, BASE_TX_OUTS, at_outs, input.outs.len());
+    ob.set_list(b, BASE_TX_INS, at_ins, input.ins.len());
+    ob.set_bytes(b, BASE_TX_MEMO, input.memo);
+    ob.finish(b)
+}
+
+/// Write a BaseTx message and answer its bytes.
+pub fn new_base_tx(input: &BaseTxInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_base_tx(&mut b, input);
+    b.set_root(at);
     b.finish()
 }
 

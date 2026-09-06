@@ -35,13 +35,21 @@ type LeafInput struct {
 	Note string
 }
 
-// NewLeaf builds a ZAP-encoded Leaf message from in and returns the bytes.
-func NewLeaf(in LeafInput) []byte {
-	b := zap.NewBuilder(256)
+// PutLeaf writes a Leaf into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutLeaf(b *zap.Builder, in LeafInput) int {
 	ob := b.StartObject(leafSize)
 	ob.SetUint32(leafTagOff, in.Tag)
 	ob.SetText(leafNoteOff, in.Note)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewLeaf builds a ZAP-encoded Leaf message from in and returns the bytes.
+func NewLeaf(in LeafInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutLeaf(b, in))
 	return b.Finish()
 }
 
@@ -97,7 +105,10 @@ func (t All) Id() [16]byte {
 	return out
 }
 func (t All) Items() zap.List { return t.o.List(allItemsOff) }
-func (t All) Inner() Leaf     { return Leaf{o: t.o.Object(allInnerOff)} }
+
+// ItemsAt returns element i of Items. Out of range returns the zero view.
+func (t All) ItemsAt(i int) Leaf { return Leaf{o: t.o.List(allItemsOff).ObjectAt(i)} }
+func (t All) Inner() Leaf        { return Leaf{o: t.o.Object(allInnerOff)} }
 
 // AllInput collects the field values for NewAll.
 type AllInput struct {
@@ -119,9 +130,17 @@ type AllInput struct {
 	Inner []byte
 }
 
-// NewAll builds a ZAP-encoded All message from in and returns the bytes.
-func NewAll(in AllInput) []byte {
-	b := zap.NewBuilder(256)
+// PutAll writes a All into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutAll(b *zap.Builder, in AllInput) int {
+	atInner := b.Embed(in.Inner)
+	itemsLB := b.StartList(0)
+	for _, elem := range in.Items {
+		itemsLB.AddObjectBytes(elem)
+	}
+	atItems := itemsLB.FinishOffset()
 	ob := b.StartObject(allSize)
 	ob.SetBool(allFlagOff, in.Flag)
 	ob.SetUint8(allA8Off, in.A8)
@@ -137,12 +156,14 @@ func NewAll(in AllInput) []byte {
 	ob.SetText(allNameOff, in.Name)
 	ob.SetBytes(allBlobOff, in.Blob)
 	ob.SetBytesFixed(allIdOff, in.Id[:])
-	itemsLB := b.StartList(0)
-	for _, elem := range in.Items {
-		itemsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(allItemsOff, itemsLB.FinishOffset(), len(in.Items))
-	ob.SetObject(allInnerOff, b.Embed(in.Inner))
-	ob.FinishAsRoot()
+	ob.SetList(allItemsOff, atItems, len(in.Items))
+	ob.SetObject(allInnerOff, atInner)
+	return ob.Finish()
+}
+
+// NewAll builds a ZAP-encoded All message from in and returns the bytes.
+func NewAll(in AllInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutAll(b, in))
 	return b.Finish()
 }

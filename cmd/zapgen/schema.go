@@ -62,7 +62,7 @@ type Field struct {
 
 // Type is the resolved type of a field. Exactly one of Kind / FixedSize
 // (if Kind == KindBytesFixed) / ListElem (if Kind == KindList) /
-// StructName (if Kind == KindStruct) carries the type detail.
+// StructName (if Kind == KindStruct or KindPtr) carries the type detail.
 type Type struct {
 	Kind       TypeKind
 	FixedSize  int    // bytes_fixed[N]
@@ -91,6 +91,7 @@ const (
 	KindText       // variable-length UTF-8
 	KindList       // list<T>
 	KindStruct     // nested struct
+	KindPtr        // ptr<T>, the element of a list whose members live apart
 )
 
 // String returns the schema name of the kind. Used in error messages.
@@ -128,6 +129,8 @@ func (k TypeKind) String() string {
 		return "list"
 	case KindStruct:
 		return "struct"
+	case KindPtr:
+		return "ptr"
 	}
 	return "invalid"
 }
@@ -150,8 +153,57 @@ func (t Type) SlotSize() int {
 		return t.FixedSize
 	case KindBytes, KindText, KindList:
 		return 8
-	case KindStruct:
+	case KindStruct, KindPtr:
 		return 4
 	}
 	return 0
+}
+
+// Inline reports whether every field of s lives in the fixed section, so a
+// value of s is a run of Size bytes with nothing pointed at from outside it.
+// Such a struct is what a list holds directly, at a stride: the elements are
+// laid end to end and the list's count is how many there are. A struct with a
+// tail cannot be laid that way — each element is written as its own message,
+// and the list counts entries rather than bytes.
+func (s *Struct) Inline() bool {
+	for _, f := range s.Fields {
+		switch f.Type.Kind {
+		case KindBytes, KindText, KindList, KindStruct:
+			return false
+		}
+	}
+	return true
+}
+
+// Find answers the struct named name, or nil.
+func (f *File) Find(name string) *Struct {
+	for _, s := range f.Structs {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
+// PtrElem answers the struct a list of pointers points at, or nil for every
+// other type.
+func (f *File) PtrElem(t Type) *Struct {
+	if t.Kind != KindList || t.ListElem == nil || t.ListElem.Kind != KindPtr {
+		return nil
+	}
+	return f.Find(t.ListElem.StructName)
+}
+
+// InlineElem answers the element struct of a list field whose elements are
+// inline, or nil for every other type — including a list of a struct that
+// carries a tail.
+func (f *File) InlineElem(t Type) *Struct {
+	if t.Kind != KindList || t.ListElem == nil || t.ListElem.Kind != KindStruct {
+		return nil
+	}
+	s := f.Find(t.ListElem.StructName)
+	if s == nil || !s.Inline() {
+		return nil
+	}
+	return s
 }

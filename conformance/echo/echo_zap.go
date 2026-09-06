@@ -4,6 +4,7 @@
 package echo
 
 import (
+	"encoding/binary"
 	"fmt"
 	zap "github.com/zap-proto/go"
 	"github.com/zap-proto/go/rpc"
@@ -34,12 +35,27 @@ type PingInput struct {
 	Seq uint64
 }
 
-// NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
-func NewPing(in PingInput) []byte {
-	b := zap.NewBuilder(256)
+// PackPing returns Ping as the pingSize bytes one element of a list holds.
+func PackPing(in PingInput) [pingSize]byte {
+	var r [pingSize]byte
+	binary.LittleEndian.PutUint64(r[pingSeqOff:], in.Seq)
+	return r
+}
+
+// PutPing writes a Ping into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutPing(b *zap.Builder, in PingInput) int {
 	ob := b.StartObject(pingSize)
 	ob.SetUint64(pingSeqOff, in.Seq)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
+func NewPing(in PingInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutPing(b, in))
 	return b.Finish()
 }
 
@@ -68,12 +84,27 @@ type PongInput struct {
 	Seq uint64
 }
 
-// NewPong builds a ZAP-encoded Pong message from in and returns the bytes.
-func NewPong(in PongInput) []byte {
-	b := zap.NewBuilder(256)
+// PackPong returns Pong as the pongSize bytes one element of a list holds.
+func PackPong(in PongInput) [pongSize]byte {
+	var r [pongSize]byte
+	binary.LittleEndian.PutUint64(r[pongSeqOff:], in.Seq)
+	return r
+}
+
+// PutPong writes a Pong into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutPong(b *zap.Builder, in PongInput) int {
 	ob := b.StartObject(pongSize)
 	ob.SetUint64(pongSeqOff, in.Seq)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewPong builds a ZAP-encoded Pong message from in and returns the bytes.
+func NewPong(in PongInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutPong(b, in))
 	return b.Finish()
 }
 

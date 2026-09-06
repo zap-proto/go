@@ -98,8 +98,8 @@ func emitRustModule(f *File, runtimePath string) ([]byte, error) {
 			return nil, err
 		}
 		emitRustOffsets(&w, s)
-		emitRustReader(&w, s)
-		emitRustBuilder(&w, s)
+		emitRustReader(&w, f, s)
+		emitRustBuilder(&w, f, s)
 	}
 	for _, iface := range f.Interfaces {
 		if err := validateInterface(f, iface); err != nil {
@@ -123,7 +123,7 @@ func emitRustOffsets(w *bytes.Buffer, s *Struct) {
 	fmt.Fprintf(w, "pub const %s_SIZE: usize = %d;\n\n", prefix, structSize(s))
 }
 
-func emitRustReader(w *bytes.Buffer, s *Struct) {
+func emitRustReader(w *bytes.Buffer, f *File, s *Struct) {
 	fmt.Fprintf(w, "/// A view of a ZAP-encoded %s. Reading a field costs a bounds check.\n", s.Name)
 	w.WriteString("#[derive(Clone, Copy, Debug)]\n")
 	fmt.Fprintf(w, "pub struct %s<'a> {\n", s.Name)
@@ -149,11 +149,38 @@ func emitRustReader(w *bytes.Buffer, s *Struct) {
 	w.WriteString("    }\n")
 
 	prefix := screamCase(s.Name)
-	for _, f := range s.Fields {
+	for _, fld := range s.Fields {
 		w.WriteString("\n")
-		emitRustFieldReader(w, prefix, f)
+		emitRustFieldReader(w, prefix, fld)
+		emitRustElemReader(w, f, prefix, fld)
 	}
 	w.WriteString("}\n\n")
+}
+
+// emitRustElemReader emits the typed element accessor of a list of structs,
+// so a caller reads one element by name instead of by stride. An inline
+// element sits at i*Size in the list's own run; one with a tail is its own
+// message, and the list holds those end to end.
+func emitRustElemReader(w *bytes.Buffer, f *File, prefix string, fld *Field) {
+	if fld.Type.Kind != KindList || fld.Type.ListElem == nil ||
+		fld.Type.ListElem.Kind != KindStruct {
+		return
+	}
+	elem := f.Find(fld.Type.ListElem.StructName)
+	if elem == nil {
+		return
+	}
+	off := prefix + "_" + screamCase(fld.Name)
+	name := rustIdent(snakeCase2(fld.Name))
+	fmt.Fprintf(w, "\n    /// Element `i` of `%s`. Out of range answers the zero view.\n", name)
+	fmt.Fprintf(w, "    pub fn %s_at(&self, i: usize) -> %s<'a> {\n", name, elem.Name)
+	if elem.Inline() {
+		fmt.Fprintf(w, "        %s::new(self.o.list(%s).object(i, %s_SIZE))\n",
+			elem.Name, off, screamCase(elem.Name))
+	} else {
+		fmt.Fprintf(w, "        %s::new(self.o.list(%s).object_at(i))\n", elem.Name, off)
+	}
+	w.WriteString("    }\n")
 }
 
 func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
@@ -187,7 +214,7 @@ func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
 	}
 }
 
-func emitRustBuilder(w *bytes.Buffer, s *Struct) {
+func emitRustBuilder(w *bytes.Buffer, f *File, s *Struct) {
 	borrows := structBorrows(s)
 	life := ""
 	if borrows {
@@ -198,8 +225,8 @@ func emitRustBuilder(w *bytes.Buffer, s *Struct) {
 	fmt.Fprintf(w, "/// The field values [`%s`] writes.\n", rustBuildName(s))
 	w.WriteString("#[derive(Clone, Copy, Debug)]\n")
 	fmt.Fprintf(w, "pub struct %s%s {\n", input, life)
-	for _, f := range s.Fields {
-		fmt.Fprintf(w, "    pub %s: %s,\n", rustIdent(snakeCase2(f.Name)), rustInputType(f.Type))
+	for _, fld := range s.Fields {
+		fmt.Fprintf(w, "    pub %s: %s,\n", rustIdent(snakeCase2(fld.Name)), rustInputType(f, fld.Type))
 	}
 	w.WriteString("}\n\n")
 
@@ -209,52 +236,166 @@ func emitRustBuilder(w *bytes.Buffer, s *Struct) {
 	fmt.Fprintf(w, "impl%s Default for %s%s {\n", life, input, life)
 	w.WriteString("    fn default() -> Self {\n")
 	fmt.Fprintf(w, "        %s {\n", input)
-	for _, f := range s.Fields {
-		fmt.Fprintf(w, "            %s: %s,\n", rustIdent(snakeCase2(f.Name)), rustZero(f.Type))
+	for _, fld := range s.Fields {
+		fmt.Fprintf(w, "            %s: %s,\n", rustIdent(snakeCase2(fld.Name)), rustZero(fld.Type))
 	}
 	w.WriteString("        }\n")
 	w.WriteString("    }\n")
 	w.WriteString("}\n\n")
 
+	emitRustPack(w, s)
+
+	prefix := screamCase(s.Name)
+	fmt.Fprintf(w, "/// Write a %s into `b` and answer where its object landed.\n", s.Name)
+	w.WriteString("///\n")
+	w.WriteString("/// What a field points AT is written first, in field order, and the\n")
+	w.WriteString("/// fixed section last: a pointer always leads backward, to bytes\n")
+	w.WriteString("/// already placed.\n")
+	fmt.Fprintf(w, "pub fn %s(b: &mut zap::Builder, input: &%s%s) -> usize {\n",
+		rustPutName(s), input, rustAnonLife(borrows))
+	for _, fld := range s.Fields {
+		emitRustLeaf(w, f, fld)
+	}
+	for _, fld := range s.Fields {
+		emitRustList(w, f, fld)
+	}
+	fmt.Fprintf(w, "    let mut ob = b.start_object(%s_SIZE);\n", prefix)
+	for _, fld := range s.Fields {
+		emitRustFieldWriter(w, prefix, fld)
+	}
+	w.WriteString("    ob.finish(b)\n")
+	w.WriteString("}\n\n")
+
 	fmt.Fprintf(w, "/// Write a %s message and answer its bytes.\n", s.Name)
 	fmt.Fprintf(w, "pub fn %s(input: &%s%s) -> Vec<u8> {\n", rustBuildName(s), input, rustAnonLife(borrows))
-	w.WriteString("    let mut b = zap::Builder::new(256);\n")
-	prefix := screamCase(s.Name)
-	fmt.Fprintf(w, "    let mut ob = b.start_object(%s_SIZE);\n", prefix)
-	for _, f := range s.Fields {
-		emitRustFieldWriter(w, prefix, f)
-	}
-	w.WriteString("    ob.finish_as_root(&mut b);\n")
+	w.WriteString("    let mut b = zap::Builder::new_v2(256);\n")
+	fmt.Fprintf(w, "    let at = %s(&mut b, input);\n", rustPutName(s))
+	w.WriteString("    b.set_root(at);\n")
 	w.WriteString("    b.finish()\n")
 	w.WriteString("}\n\n")
 }
 
+// rustPutName is the free function that writes one struct into a builder in
+// progress: struct Out -> put_out. new_out is that plus a message around it.
+func rustPutName(s *Struct) string { return "put_" + snakeCase2(s.Name) }
+
+// rustLife is the lifetime a struct's Input type carries, if it borrows.
+func rustLife(s *Struct) string {
+	if structBorrows(s) {
+		return "<'a>"
+	}
+	return ""
+}
+
+// emitRustPack emits the record form of an inline struct: its Size bytes,
+// which is what one element of a list of it looks like on the wire. A struct
+// with a tail has no record form — it is written as its own message.
+func emitRustPack(w *bytes.Buffer, s *Struct) {
+	if !s.Inline() {
+		return
+	}
+	prefix := screamCase(s.Name)
+	borrows := structBorrows(s)
+	fmt.Fprintf(w, "/// %s as the %s_SIZE bytes one element of a list holds.\n", s.Name, prefix)
+	fmt.Fprintf(w, "pub fn %s(input: &%sInput%s) -> [u8; %s_SIZE] {\n",
+		rustPackName(s), s.Name, rustAnonLife(borrows), prefix)
+	fmt.Fprintf(w, "    let mut r = [0u8; %s_SIZE];\n", prefix)
+	for _, fld := range s.Fields {
+		off := prefix + "_" + screamCase(fld.Name)
+		name := rustIdent(snakeCase2(fld.Name))
+		switch fld.Type.Kind {
+		case KindBool:
+			fmt.Fprintf(w, "    r[%s] = input.%s as u8;\n", off, name)
+		case KindU8:
+			fmt.Fprintf(w, "    r[%s] = input.%s;\n", off, name)
+		case KindI8:
+			fmt.Fprintf(w, "    r[%s] = input.%s as u8;\n", off, name)
+		case KindBytesFixed:
+			fmt.Fprintf(w, "    r[%s..%s + %d].copy_from_slice(input.%s);\n",
+				off, off, fld.Type.FixedSize, name)
+		default:
+			n := fld.Type.SlotSize()
+			fmt.Fprintf(w, "    r[%s..%s + %d].copy_from_slice(&input.%s.to_le_bytes());\n",
+				off, off, n, name)
+		}
+	}
+	w.WriteString("    r\n")
+	w.WriteString("}\n\n")
+}
+
+// rustPackName is the free function that writes one inline struct's record:
+// struct Out -> pack_out.
+func rustPackName(s *Struct) string { return "pack_" + snakeCase2(s.Name) }
+
+// emitRustLeaf writes the objects a field's pointers will name, before any
+// pointer run exists. Every one of them is written first, in field order,
+// which is where the reference wire puts them.
+func emitRustLeaf(w *bytes.Buffer, f *File, fld *Field) {
+	name := rustIdent(snakeCase2(fld.Name))
+	switch fld.Type.Kind {
+	case KindStruct:
+		// The caller passes a message it built already. Embed copies it and
+		// answers where its ROOT lands — a pointer to the head of the copy
+		// would name the copy's header, not its first field.
+		fmt.Fprintf(w, "    let at_%s = b.embed(input.%s);\n", name, name)
+	case KindList:
+		elem := f.PtrElem(fld.Type)
+		if elem == nil {
+			return
+		}
+		fmt.Fprintf(w, "    let mut offs_%s: Vec<usize> = Vec::with_capacity(input.%s.len());\n", name, name)
+		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
+		fmt.Fprintf(w, "        offs_%s.push(%s(b, elem));\n", name, rustPutName(elem))
+		w.WriteString("    }\n")
+	}
+}
+
+// emitRustList lays down one list's run of elements: records end to end for
+// an inline element, a length before each entry for one with a tail, and a
+// signed offset per element for a list of pointers.
+func emitRustList(w *bytes.Buffer, f *File, fld *Field) {
+	if fld.Type.Kind != KindList {
+		return
+	}
+	name := rustIdent(snakeCase2(fld.Name))
+	fmt.Fprintf(w, "    let mut list_%s = b.start_list();\n", name)
+	switch {
+	case f.PtrElem(fld.Type) != nil:
+		fmt.Fprintf(w, "    for at in &offs_%s {\n", name)
+		fmt.Fprintf(w, "        list_%s.add_object_ptr(b, *at);\n", name)
+	case f.InlineElem(fld.Type) != nil:
+		// Inline elements lie end to end, so the count the pointer carries
+		// is the caller's own element count, not a byte total.
+		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
+		fmt.Fprintf(w, "        list_%s.add_bytes(b, elem);\n", name)
+	default:
+		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
+		fmt.Fprintf(w, "        list_%s.add_object_bytes(b, elem);\n", name)
+	}
+	w.WriteString("    }\n")
+	fmt.Fprintf(w, "    let at_%s = list_%s.finish_offset();\n", name, name)
+}
+
+// emitRustFieldWriter sets one field of the fixed section. A pointer field
+// names what emitRustTail already placed.
 func emitRustFieldWriter(w *bytes.Buffer, prefix string, f *Field) {
 	off := prefix + "_" + screamCase(f.Name)
 	name := rustIdent(snakeCase2(f.Name))
 	switch f.Type.Kind {
 	case KindBool:
-		fmt.Fprintf(w, "    ob.set_bool(&mut b, %s, input.%s);\n", off, name)
+		fmt.Fprintf(w, "    ob.set_bool(b, %s, input.%s);\n", off, name)
 	case KindU8, KindU16, KindU32, KindU64, KindI8, KindI16, KindI32, KindI64, KindF32, KindF64:
-		fmt.Fprintf(w, "    ob.set_%s(&mut b, %s, input.%s);\n", rustScalarCall(f.Type.Kind), off, name)
+		fmt.Fprintf(w, "    ob.set_%s(b, %s, input.%s);\n", rustScalarCall(f.Type.Kind), off, name)
 	case KindText:
-		fmt.Fprintf(w, "    ob.set_text(&mut b, %s, input.%s);\n", off, name)
+		fmt.Fprintf(w, "    ob.set_text(b, %s, input.%s);\n", off, name)
 	case KindBytes:
-		fmt.Fprintf(w, "    ob.set_bytes(&mut b, %s, input.%s);\n", off, name)
+		fmt.Fprintf(w, "    ob.set_bytes(b, %s, input.%s);\n", off, name)
 	case KindBytesFixed:
-		fmt.Fprintf(w, "    ob.set_bytes_fixed(&mut b, %s, input.%s);\n", off, name)
+		fmt.Fprintf(w, "    ob.set_bytes_fixed(b, %s, input.%s);\n", off, name)
 	case KindList:
-		fmt.Fprintf(w, "    let mut list_%s = b.start_list();\n", name)
-		fmt.Fprintf(w, "    for elem in input.%s {\n", name)
-		fmt.Fprintf(w, "        list_%s.add_object_bytes(&mut b, elem);\n", name)
-		w.WriteString("    }\n")
-		fmt.Fprintf(w, "    ob.set_list(&mut b, %s, list_%s.finish_offset(), input.%s.len());\n", off, name, name)
+		fmt.Fprintf(w, "    ob.set_list(b, %s, at_%s, input.%s.len());\n", off, name, name)
 	case KindStruct:
-		// Nested struct: the caller passes a message it built already. Embed
-		// copies it and answers where its ROOT lands — a pointer to the head
-		// of the copy would name the copy's header, not its first field.
-		fmt.Fprintf(w, "    let at_%s = b.embed(input.%s);\n", name, name)
-		fmt.Fprintf(w, "    ob.set_object(&mut b, %s, at_%s);\n", off, name)
+		fmt.Fprintf(w, "    ob.set_object(b, %s, at_%s);\n", off, name)
 	}
 }
 
@@ -312,7 +453,7 @@ func rustScalar(k TypeKind) string {
 // own name — u32() reads a u32 — so one table serves both directions.
 func rustScalarCall(k TypeKind) string { return rustScalar(k) }
 
-func rustInputType(t Type) string {
+func rustInputType(f *File, t Type) string {
 	switch t.Kind {
 	case KindBool:
 		return "bool"
@@ -323,7 +464,13 @@ func rustInputType(t Type) string {
 	case KindBytesFixed:
 		return fmt.Sprintf("&'a [u8; %d]", t.FixedSize)
 	case KindList:
-		// Each element arrives already written, as its own message.
+		if elem := f.PtrElem(t); elem != nil {
+			// The elements are written into this same buffer, so they
+			// arrive as values rather than as bytes.
+			return "&'a [" + elem.Name + "Input" + rustLife(elem) + "]"
+		}
+		// Each element arrives already written: a record for an inline
+		// element, its own message for one with a tail.
 		return "&'a [&'a [u8]]"
 	case KindStruct:
 		// A nested struct arrives already written, as its own message.

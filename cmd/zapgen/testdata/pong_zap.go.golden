@@ -4,6 +4,7 @@
 package echo
 
 import (
+	"encoding/binary"
 	zap "github.com/zap-proto/go"
 )
 
@@ -32,11 +33,26 @@ type PongInput struct {
 	Seq uint64
 }
 
-// NewPong builds a ZAP-encoded Pong message from in and returns the bytes.
-func NewPong(in PongInput) []byte {
-	b := zap.NewBuilder(256)
+// PackPong returns Pong as the pongSize bytes one element of a list holds.
+func PackPong(in PongInput) [pongSize]byte {
+	var r [pongSize]byte
+	binary.LittleEndian.PutUint64(r[pongSeqOff:], in.Seq)
+	return r
+}
+
+// PutPong writes a Pong into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutPong(b *zap.Builder, in PongInput) int {
 	ob := b.StartObject(pongSize)
 	ob.SetUint64(pongSeqOff, in.Seq)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewPong builds a ZAP-encoded Pong message from in and returns the bytes.
+func NewPong(in PongInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutPong(b, in))
 	return b.Finish()
 }

@@ -4,6 +4,7 @@
 package xchain
 
 import (
+	"encoding/binary"
 	zap "github.com/zap-proto/go"
 )
 
@@ -38,14 +39,22 @@ type SignedInput struct {
 	CredentialBytes []byte
 }
 
-// NewSigned builds a ZAP-encoded Signed message from in and returns the bytes.
-func NewSigned(in SignedInput) []byte {
-	b := zap.NewBuilder(256)
+// PutSigned writes a Signed into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutSigned(b *zap.Builder, in SignedInput) int {
 	ob := b.StartObject(signedSize)
 	ob.SetBytes(signedUnsignedOff, in.Unsigned)
 	ob.SetUint32(signedCredentialCountOff, in.CredentialCount)
 	ob.SetBytes(signedCredentialBytesOff, in.CredentialBytes)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewSigned builds a ZAP-encoded Signed message from in and returns the bytes.
+func NewSigned(in SignedInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutSigned(b, in))
 	return b.Finish()
 }
 
@@ -78,8 +87,14 @@ func (t Base) BlockchainID() [32]byte {
 	return out
 }
 func (t Base) Outs() zap.List { return t.o.List(baseOutsOff) }
-func (t Base) Ins() zap.List  { return t.o.List(baseInsOff) }
-func (t Base) Memo() []byte   { return t.o.Bytes(baseMemoOff) }
+
+// OutsAt returns element i of Outs. Out of range returns the zero view.
+func (t Base) OutsAt(i int) Ptr { return Ptr{o: t.o.List(baseOutsOff).Object(i, ptrSize)} }
+func (t Base) Ins() zap.List    { return t.o.List(baseInsOff) }
+
+// InsAt returns element i of Ins. Out of range returns the zero view.
+func (t Base) InsAt(i int) Ptr { return Ptr{o: t.o.List(baseInsOff).Object(i, ptrSize)} }
+func (t Base) Memo() []byte    { return t.o.Bytes(baseMemoOff) }
 
 // BaseInput collects the field values for NewBase.
 type BaseInput struct {
@@ -90,24 +105,34 @@ type BaseInput struct {
 	Memo         []byte
 }
 
-// NewBase builds a ZAP-encoded Base message from in and returns the bytes.
-func NewBase(in BaseInput) []byte {
-	b := zap.NewBuilder(256)
+// PutBase writes a Base into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutBase(b *zap.Builder, in BaseInput) int {
+	outsLB := b.StartList(0)
+	for _, elem := range in.Outs {
+		outsLB.AddBytes(elem)
+	}
+	atOuts := outsLB.FinishOffset()
+	insLB := b.StartList(0)
+	for _, elem := range in.Ins {
+		insLB.AddBytes(elem)
+	}
+	atIns := insLB.FinishOffset()
 	ob := b.StartObject(baseSize)
 	ob.SetUint32(baseNetworkIDOff, in.NetworkID)
 	ob.SetBytesFixed(baseBlockchainIDOff, in.BlockchainID[:])
-	outsLB := b.StartList(0)
-	for _, elem := range in.Outs {
-		outsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseOutsOff, outsLB.FinishOffset(), len(in.Outs))
-	insLB := b.StartList(0)
-	for _, elem := range in.Ins {
-		insLB.AddObjectBytes(elem)
-	}
-	ob.SetList(baseInsOff, insLB.FinishOffset(), len(in.Ins))
+	ob.SetList(baseOutsOff, atOuts, len(in.Outs))
+	ob.SetList(baseInsOff, atIns, len(in.Ins))
 	ob.SetBytes(baseMemoOff, in.Memo)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewBase builds a ZAP-encoded Base message from in and returns the bytes.
+func NewBase(in BaseInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutBase(b, in))
 	return b.Finish()
 }
 
@@ -136,12 +161,27 @@ type PtrInput struct {
 	Offset uint32
 }
 
-// NewPtr builds a ZAP-encoded Ptr message from in and returns the bytes.
-func NewPtr(in PtrInput) []byte {
-	b := zap.NewBuilder(256)
+// PackPtr returns Ptr as the ptrSize bytes one element of a list holds.
+func PackPtr(in PtrInput) [ptrSize]byte {
+	var r [ptrSize]byte
+	binary.LittleEndian.PutUint32(r[ptrOffsetOff:], in.Offset)
+	return r
+}
+
+// PutPtr writes a Ptr into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutPtr(b *zap.Builder, in PtrInput) int {
 	ob := b.StartObject(ptrSize)
 	ob.SetUint32(ptrOffsetOff, in.Offset)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewPtr builds a ZAP-encoded Ptr message from in and returns the bytes.
+func NewPtr(in PtrInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutPtr(b, in))
 	return b.Finish()
 }
 
@@ -181,7 +221,10 @@ func (t Block) Root() [32]byte {
 	return out
 }
 func (t Block) TxLengths() zap.List { return t.o.List(blockTxLengthsOff) }
-func (t Block) TxBlob() []byte      { return t.o.Bytes(blockTxBlobOff) }
+
+// TxLengthsAt returns element i of TxLengths. Out of range returns the zero view.
+func (t Block) TxLengthsAt(i int) Ptr { return Ptr{o: t.o.List(blockTxLengthsOff).Object(i, ptrSize)} }
+func (t Block) TxBlob() []byte        { return t.o.Bytes(blockTxBlobOff) }
 
 // BlockInput collects the field values for NewBlock.
 type BlockInput struct {
@@ -193,20 +236,29 @@ type BlockInput struct {
 	TxBlob    []byte
 }
 
-// NewBlock builds a ZAP-encoded Block message from in and returns the bytes.
-func NewBlock(in BlockInput) []byte {
-	b := zap.NewBuilder(256)
+// PutBlock writes a Block into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutBlock(b *zap.Builder, in BlockInput) int {
+	txLengthsLB := b.StartList(0)
+	for _, elem := range in.TxLengths {
+		txLengthsLB.AddBytes(elem)
+	}
+	atTxLengths := txLengthsLB.FinishOffset()
 	ob := b.StartObject(blockSize)
 	ob.SetBytesFixed(blockParentOff, in.Parent[:])
 	ob.SetUint64(blockHeightOff, in.Height)
 	ob.SetUint64(blockTimeOff, in.Time)
 	ob.SetBytesFixed(blockRootOff, in.Root[:])
-	txLengthsLB := b.StartList(0)
-	for _, elem := range in.TxLengths {
-		txLengthsLB.AddObjectBytes(elem)
-	}
-	ob.SetList(blockTxLengthsOff, txLengthsLB.FinishOffset(), len(in.TxLengths))
+	ob.SetList(blockTxLengthsOff, atTxLengths, len(in.TxLengths))
 	ob.SetBytes(blockTxBlobOff, in.TxBlob)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewBlock builds a ZAP-encoded Block message from in and returns the bytes.
+func NewBlock(in BlockInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutBlock(b, in))
 	return b.Finish()
 }

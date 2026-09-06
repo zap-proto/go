@@ -422,6 +422,32 @@ impl<'a> List<'a> {
         }
     }
 
+    /// Element `i` of a list of POINTERS: a 4-byte signed offset from the
+    /// element's own position, dereferenced exactly as [`Object::object`]
+    /// does. The objects lie in the same buffer, written before the pointer
+    /// run, so the offsets are usually negative.
+    pub fn object_ptr(&self, i: usize) -> Object<'a> {
+        if i >= self.length {
+            return Object::null();
+        }
+        let pos = self.offset + i * 4;
+        if pos + 4 > self.data.len() {
+            return Object::null();
+        }
+        let rel = u32_at(self.data, pos) as i32;
+        if rel == 0 {
+            return Object::null();
+        }
+        let abs = pos as i64 + rel as i64;
+        if abs < HEADER_SIZE as i64 || abs >= self.data.len() as i64 {
+            return Object::null();
+        }
+        Object {
+            data: self.data,
+            offset: abs as usize,
+        }
+    }
+
     /// The list's whole byte run — the shape a fixed-stride list is written in.
     pub fn bytes(&self) -> &'a [u8] {
         if !self.present || self.offset + self.length > self.data.len() {
@@ -894,6 +920,23 @@ impl ListBuilder {
         b.buf[p..p + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
         b.buf[p + 4..p + 4 + data.len()].copy_from_slice(data);
         b.pos = p + 4 + data.len();
+        self.count += 1;
+    }
+
+    /// Append one 4-byte SIGNED pointer to the object at `target`. The
+    /// element kind of a list whose members live elsewhere in the buffer:
+    /// they are written first and the pointer run after, so the offsets are
+    /// usually negative. Zero writes the null pointer.
+    pub fn add_object_ptr(&mut self, b: &mut Builder, target: usize) {
+        b.grow(4);
+        let p = b.pos;
+        let v: u32 = if target == 0 {
+            0
+        } else {
+            ((target as i64 - p as i64) as i32) as u32
+        };
+        b.buf[p..p + 4].copy_from_slice(&v.to_le_bytes());
+        b.pos = p + 4;
         self.count += 1;
     }
 

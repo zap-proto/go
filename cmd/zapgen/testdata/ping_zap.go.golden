@@ -4,6 +4,7 @@
 package echo
 
 import (
+	"encoding/binary"
 	zap "github.com/zap-proto/go"
 )
 
@@ -32,11 +33,26 @@ type PingInput struct {
 	Seq uint64
 }
 
-// NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
-func NewPing(in PingInput) []byte {
-	b := zap.NewBuilder(256)
+// PackPing returns Ping as the pingSize bytes one element of a list holds.
+func PackPing(in PingInput) [pingSize]byte {
+	var r [pingSize]byte
+	binary.LittleEndian.PutUint64(r[pingSeqOff:], in.Seq)
+	return r
+}
+
+// PutPing writes a Ping into b and returns where its object landed.
+//
+// What a field points AT is written first, in field order, and the fixed
+// section last: a pointer always leads backward, to bytes already placed.
+func PutPing(b *zap.Builder, in PingInput) int {
 	ob := b.StartObject(pingSize)
 	ob.SetUint64(pingSeqOff, in.Seq)
-	ob.FinishAsRoot()
+	return ob.Finish()
+}
+
+// NewPing builds a ZAP-encoded Ping message from in and returns the bytes.
+func NewPing(in PingInput) []byte {
+	b := zap.NewBuilderV2(256)
+	b.SetRoot(PutPing(b, in))
 	return b.Finish()
 }
