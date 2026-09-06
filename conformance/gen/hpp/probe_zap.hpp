@@ -114,7 +114,7 @@ class Wide {
     std::string_view Name() const { return o_.text(kWideNameOff); }
     std::span<const std::uint8_t> Blob() const { return o_.bytes(kWideBlobOff); }
     zap::List Items() const { return o_.list(kWideItemsOff); }
-    Inner Child() const;
+    ::probe::Inner Child() const;
 
   private:
     zap::Object o_;
@@ -183,6 +183,6 @@ inline std::vector<std::uint8_t> NewWide(const WideInput& in) {
 }
 
 // Nested-struct accessors, defined once every class above is complete.
-inline Inner Wide::Child() const { return Inner(o_.object(kWideChildOff)); }
+inline ::probe::Inner Wide::Child() const { return ::probe::Inner(o_.object(kWideChildOff)); }
 
 }  // namespace probe

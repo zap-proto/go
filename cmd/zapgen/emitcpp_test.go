@@ -137,7 +137,8 @@ func TestCPPFixedFieldIsAlwaysItsWidth(t *testing.T) {
 
 // TestCPPNestedStructOrderIsFree checks that a struct may name one declared
 // after it: the classes are forward-declared and the accessors that return one
-// are defined after every class body.
+// are defined after every class body, under their qualified name so a field
+// may carry the name of its own type.
 func TestCPPNestedStructOrderIsFree(t *testing.T) {
 	src := []byte(`package p
 struct A {
@@ -157,10 +158,11 @@ struct B {
 	if !strings.Contains(out, "class A;\nclass B;") {
 		t.Error("classes are not forward-declared")
 	}
-	if !strings.Contains(out, "inline B A::Child() const { return B(o_.object(kAChildOff)); }") {
-		t.Error("nested accessor is not defined out of line")
+	want := "inline ::p::B A::Child() const { return ::p::B(o_.object(kAChildOff)); }"
+	if !strings.Contains(out, want) {
+		t.Error("nested accessor is not defined out of line, qualified")
 	}
-	if strings.Index(out, "class B {") > strings.Index(out, "inline B A::Child()") {
+	if strings.Index(out, "class B {") > strings.Index(out, want) {
 		t.Error("nested accessor is defined before the class it returns")
 	}
 }

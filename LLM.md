@@ -90,7 +90,16 @@ them differ, both now pinned by a test:
   `zap::kVersion1`.
 - **A `bytes_fixed[N]` field is always N bytes.** Go's `[N]byte` answers N
   zeros for a buffer too short to hold it, so the C++ span accessor answers
-  a zero span of length N rather than an empty one. Drop a `//go:generate zapgen schema.zap` line in the consuming
+  a zero span of length N rather than an empty one.
+
+Two places the C++ emitter differs because C++ does:
+
+- A nested-struct accessor is written under its qualified name
+  (`::pkg::Child`), because a field may carry the name of its own type and the
+  member would otherwise shadow the class. Go has no such collision.
+- Two structs that point at each other need `-single`. Per-struct headers
+  cannot both be complete for the other, so the cycle is expressible in one
+  header and not in two. Go compiles either. Drop a `//go:generate zapgen schema.zap` line in the consuming
 package; `examples/echo` is a worked end-to-end demo (generated code +
 in-memory client/server round-trip test).
 

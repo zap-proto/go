@@ -63,8 +63,8 @@ func EmitCPP(f *File) (map[string][]byte, error) {
 		writeCPPIncludes(&w, f, s)
 		writeCPPOpen(&w, f)
 		writeCPPForwards(&w, one)
-		emitCPPStruct(&w, s)
-		emitCPPOutOfLine(&w, one)
+		emitCPPStruct(&w, f, s)
+		emitCPPOutOfLine(&w, f, one)
 		writeCPPClose(&w, f)
 		out[snakeCase(s.Name)+"_zap.hpp"] = w.Bytes()
 	}
@@ -103,9 +103,9 @@ func EmitCPPSingle(f *File) (string, []byte, error) {
 	writeCPPOpen(&w, f)
 	writeCPPForwards(&w, f.Structs)
 	for _, s := range f.Structs {
-		emitCPPStruct(&w, s)
+		emitCPPStruct(&w, f, s)
 	}
-	emitCPPOutOfLine(&w, f.Structs)
+	emitCPPOutOfLine(&w, f, f.Structs)
 	for _, iface := range f.Interfaces {
 		emitCPPInterface(&w, iface)
 	}
@@ -218,22 +218,51 @@ func writeCPPClose(w *bytes.Buffer, f *File) {
 // every class is complete. Declaration order in the schema then carries no
 // meaning, and a cycle between two structs is expressible.
 func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
-	if len(structs) == 0 {
-		return
+	seen := map[string]bool{}
+	var names []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
 	for _, s := range structs {
-		fmt.Fprintf(w, "class %s;\n", s.Name)
+		add(s.Name)
+	}
+	// Also every class this file NAMES: a per-struct file declares its
+	// nested types here and includes their headers for the definitions.
+	for _, s := range structs {
+		for _, f := range s.Fields {
+			if f.Type.Kind == KindStruct {
+				add(f.Type.StructName)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	for _, name := range names {
+		fmt.Fprintf(w, "class %s;\n", name)
 	}
 	w.WriteString("\n")
 }
 
 // --- structs ----------------------------------------------------------------
 
-func emitCPPStruct(w *bytes.Buffer, s *Struct) {
+func emitCPPStruct(w *bytes.Buffer, f *File, s *Struct) {
 	emitCPPOffsets(w, s)
-	emitCPPReader(w, s)
+	emitCPPReader(w, f, s)
 	emitCPPBuilder(w, s)
 	w.WriteString("\n")
+}
+
+// cppTypeName qualifies a generated class with its namespace. A field may
+// carry the name of its own type — `Child Child` is a natural schema — and in
+// C++ the member then shadows the class inside the class body. The qualified
+// name says which is meant; Go has no such collision, so this is a place the
+// two emitters honestly differ.
+func cppTypeName(f *File, name string) string {
+	return "::" + f.Package + "::" + name
 }
 
 func emitCPPOffsets(w *bytes.Buffer, s *Struct) {
@@ -247,7 +276,7 @@ func emitCPPOffsets(w *bytes.Buffer, s *Struct) {
 func cppOffsetName(s *Struct, f *Field) string { return "k" + s.Name + f.Name + "Off" }
 func cppSizeName(s *Struct) string             { return "k" + s.Name + "Size" }
 
-func emitCPPReader(w *bytes.Buffer, s *Struct) {
+func emitCPPReader(w *bytes.Buffer, f *File, s *Struct) {
 	fmt.Fprintf(w, "// %s is a zero-copy view into a ZAP-encoded %s message. It borrows the\n", s.Name, s.Name)
 	w.WriteString("// bytes it was built over, which must outlive it, and copies no field.\n")
 	fmt.Fprintf(w, "class %s {\n", s.Name)
@@ -256,8 +285,8 @@ func emitCPPReader(w *bytes.Buffer, s *Struct) {
 	fmt.Fprintf(w, "    explicit %s(zap::Object o) : o_(o) {}\n\n", s.Name)
 	w.WriteString("    bool is_null() const { return o_.is_null(); }\n")
 	w.WriteString("    zap::Object object() const { return o_; }\n\n")
-	for _, f := range s.Fields {
-		emitCPPFieldReader(w, s, f)
+	for _, fd := range s.Fields {
+		emitCPPFieldReader(w, f, s, fd)
 	}
 	w.WriteString("\n  private:\n")
 	w.WriteString("    zap::Object o_;\n")
@@ -272,7 +301,7 @@ func emitCPPReader(w *bytes.Buffer, s *Struct) {
 	w.WriteString("}\n\n")
 }
 
-func emitCPPFieldReader(w *bytes.Buffer, s *Struct, f *Field) {
+func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 	off := cppOffsetName(s, f)
 	switch f.Type.Kind {
 	case KindBool:
@@ -316,14 +345,14 @@ func emitCPPFieldReader(w *bytes.Buffer, s *Struct, f *Field) {
 		fmt.Fprintf(w, "    zap::List %s() const { return o_.list(%s); }\n", f.Name, off)
 	case KindStruct:
 		// Declared here, defined by emitCPPOutOfLine once every class exists.
-		fmt.Fprintf(w, "    %s %s() const;\n", f.Type.StructName, f.Name)
+		fmt.Fprintf(w, "    %s %s() const;\n", cppTypeName(file, f.Type.StructName), f.Name)
 	}
 }
 
 // emitCPPOutOfLine defines the accessors that return another generated class.
 // They are declared in-class and defined here, after every class in the file
 // is complete, so schema declaration order does not constrain the header.
-func emitCPPOutOfLine(w *bytes.Buffer, structs []*Struct) {
+func emitCPPOutOfLine(w *bytes.Buffer, file *File, structs []*Struct) {
 	first := true
 	for _, s := range structs {
 		for _, f := range s.Fields {
@@ -334,8 +363,9 @@ func emitCPPOutOfLine(w *bytes.Buffer, structs []*Struct) {
 				w.WriteString("// Nested-struct accessors, defined once every class above is complete.\n")
 				first = false
 			}
+			name := cppTypeName(file, f.Type.StructName)
 			fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
-				f.Type.StructName, s.Name, f.Name, f.Type.StructName, cppOffsetName(s, f))
+				name, s.Name, f.Name, name, cppOffsetName(s, f))
 		}
 	}
 	if !first {
