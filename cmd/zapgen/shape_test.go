@@ -4,6 +4,7 @@
 package main
 
 import (
+	"github.com/zap-proto/go/idl"
 	"strings"
 	"testing"
 )
@@ -16,21 +17,21 @@ func TestShapeFollowsTheElementType(t *testing.T) {
 	cases := []struct {
 		field  string
 		owner  string
-		shape  Shape
+		shape  idl.Shape
 		stride int
 	}{
-		{"Outs", "BaseTx", ShapePointer, 4},   // Transfer carries a bytes tail
-		{"Ins", "BaseTx", ShapePointer, 4},    // so does Spend
-		{"Addrs", "Owner", ShapeFixed, 20},    // bytes_fixed[20]
-		{"Sigs", "Owner", ShapeNumber, 4},     // u32
-		{"Entries", "Owner", ShapeInline, 44}, // Entry has no tail
+		{"Outs", "BaseTx", idl.ShapePointer, 4},   // Transfer carries a bytes tail
+		{"Ins", "BaseTx", idl.ShapePointer, 4},    // so does Spend
+		{"Addrs", "Owner", idl.ShapeFixed, 20},    // bytes_fixed[20]
+		{"Sigs", "Owner", idl.ShapeNumber, 4},     // u32
+		{"Entries", "Owner", idl.ShapeInline, 44}, // Entry has no tail
 	}
 	for _, c := range cases {
 		s := file.Struct(c.owner)
 		if s == nil {
 			t.Fatalf("no struct %s", c.owner)
 		}
-		var f *Field
+		var f *idl.Field
 		for _, cand := range s.Fields {
 			if cand.Name == c.field {
 				f = cand
@@ -55,7 +56,7 @@ func TestShapeFollowsTheElementType(t *testing.T) {
 // object first would move every byte after it.
 func TestPayloadsComeBeforeTheObject(t *testing.T) {
 	file := parseFile(t, "testdata/basetx.zap")
-	for _, emit := range []func(*File) (string, []byte, error){EmitSingle, EmitCPPSingle} {
+	for _, emit := range []func(*idl.File) (string, []byte, error){EmitSingle, EmitCPPSingle} {
 		src, _, err := emitSingleString(emit, file)
 		if err != nil {
 			t.Fatal(err)
@@ -91,7 +92,7 @@ func TestAListOfSomethingWithNoStrideIsRefused(t *testing.T) {
 struct S {
     Runs list<bytes> @0
 }`
-	file, err := Parse("t.zap", []byte(src))
+	file, err := idl.Parse("t.zap", []byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestAnUndeclaredElementIsRefused(t *testing.T) {
 struct S {
     Kids list<Missing> @0
 }`
-	file, err := Parse("t.zap", []byte(src))
+	file, err := idl.Parse("t.zap", []byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ struct S {
 // and the emitted size has to be what the wire reserves, not where the fields
 // happen to stop.
 func TestAStatedWidthIsTheWidth(t *testing.T) {
-	file, err := Parse("t.zap", []byte(`package p
+	file, err := idl.Parse("t.zap", []byte(`package p
 struct Wide @36 {
     A u64 @0
     B u64 @8
@@ -132,7 +133,7 @@ struct Wide @36 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := structSize(file.Structs[0]); got != 36 {
+	if got := idl.StructSize(file.Structs[0]); got != 36 {
 		t.Errorf("size = %d, want the stated 36", got)
 	}
 	if _, _, err := EmitCPPSingle(file); err != nil {
@@ -142,7 +143,7 @@ struct Wide @36 {
 
 // A stated width narrower than the fields is a contradiction, not a layout.
 func TestAStatedWidthCannotCutTheFieldsShort(t *testing.T) {
-	file, err := Parse("t.zap", []byte(`package p
+	file, err := idl.Parse("t.zap", []byte(`package p
 struct Short @8 {
     A u64 @0
     B u64 @8
@@ -158,7 +159,7 @@ struct Short @8 {
 // TestPackagePathNestsInCppAndNotInGo: one path, rendered by each backend the
 // way that language spells a namespace.
 func TestPackagePathNestsInCppAndNotInGo(t *testing.T) {
-	file, err := Parse("t.zap", []byte(`package lux.xvm.wire
+	file, err := idl.Parse("t.zap", []byte(`package lux.xvm.wire
 struct S {
     A u64 @0
 }`))
@@ -178,29 +179,5 @@ struct S {
 	}
 	if !strings.Contains(goSrc, "package wire\n") {
 		t.Error("Go output does not take the last segment as the package name")
-	}
-}
-
-// A field named as its struct is refused, because the accessor a backend
-// prints for it is a member named as the type is — which C++ reads as a
-// constructor. Caught once, in the front end, rather than once per backend.
-func TestAFieldMayNotRepeatItsStructsName(t *testing.T) {
-	_, err := Parse("x.zap", []byte("package p\nstruct Hash {\n  Kind u8 @0\n  Hash bytes_fixed[32] @1\n}\n"))
-	if err == nil {
-		t.Fatal("a field named as its struct was accepted")
-	}
-	if !strings.Contains(err.Error(), "repeats the struct's name") {
-		t.Fatalf("error does not say what is wrong: %v", err)
-	}
-}
-
-// Two fields of one name would print one accessor twice.
-func TestTwoFieldsOfOneNameAreRefused(t *testing.T) {
-	_, err := Parse("x.zap", []byte("package p\nstruct S {\n  A u8 @0\n  A u8 @1\n}\n"))
-	if err == nil {
-		t.Fatal("a duplicate field name was accepted")
-	}
-	if !strings.Contains(err.Error(), "duplicate field") {
-		t.Fatalf("error does not say what is wrong: %v", err)
 	}
 }

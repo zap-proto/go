@@ -1,7 +1,22 @@
 // Copyright (C) 2025, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-package main
+// Package idl reads .zap schema source into an AST.
+//
+// [Parse] is the whole surface: source in, a [File] out, carrying the package
+// name, the type aliases, the structs with their fields and author-declared
+// offsets, and the interfaces with their methods and wire ordinals.
+//
+// It was cmd/zapgen's own code and is a package because the tool is not its
+// only reader. A generator that projects a schema onto something other than Go
+// accessors — an SDK, a service door, a document — needs the same AST, and a
+// second parser would be a second grammar: the two would agree until they did
+// not, and the schema would then mean whichever one you asked. There is one.
+//
+// The grammar is stated on the parse functions below. What is not in it is
+// worth saying here: no enums, no unions, no imports, no defaults, and no doc
+// comments — a `#` comment is skipped as whitespace and reaches no node.
+package idl
 
 import (
 	"fmt"

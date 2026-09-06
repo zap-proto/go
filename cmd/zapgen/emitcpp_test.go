@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/zap-proto/go/idl"
 	"os"
 	"path/filepath"
 	"sort"
@@ -147,7 +148,7 @@ struct A {
 struct B {
     N u32 @0
 }`)
-	file, err := Parse("order.zap", src)
+	file, err := idl.Parse("order.zap", src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,20 +185,20 @@ func TestUnknownLangIsRefused(t *testing.T) {
 // about what a line says does not also assert how gofmt aligned it.
 func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-func parseFile(t *testing.T, path string) *File {
+func parseFile(t *testing.T, path string) *idl.File {
 	t.Helper()
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	file, err := Parse(path, src)
+	file, err := idl.Parse(path, src)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return file
 }
 
-func emitSingleString(emit func(*File) (string, []byte, error), f *File) (string, string, error) {
+func emitSingleString(emit func(*idl.File) (string, []byte, error), f *idl.File) (string, string, error) {
 	name, body, err := emit(f)
 	return string(body), name, err
 }

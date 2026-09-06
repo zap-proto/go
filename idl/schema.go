@@ -1,7 +1,7 @@
 // Copyright (C) 2025, Lux Industries Inc. All rights reserved.
 // See the file LICENSE for licensing terms.
 
-package main
+package idl
 
 // AST types for the .zap schema DSL.
 //
@@ -224,9 +224,27 @@ func (f *File) Stride(elem Type) int {
 	case ShapeFixed:
 		return elem.FixedSize
 	case ShapeInline:
-		return structSize(f.Struct(elem.StructName))
+		return StructSize(f.Struct(elem.StructName))
 	case ShapePointer:
 		return ptrStride
 	}
 	return elem.SlotSize()
+}
+
+// StructSize is the width of the fixed section: what the schema says, or where
+// the last field ends when the schema says nothing. Nothing is rounded — the
+// layout is the author's, and a record whose reserved width is wider than its
+// fields fill says so with `struct Name @N`.
+func StructSize(s *Struct) int {
+	if s.Size > 0 {
+		return s.Size
+	}
+	size := 0
+	for _, f := range s.Fields {
+		end := f.Offset + f.Type.SlotSize()
+		if end > size {
+			size = end
+		}
+	}
+	return size
 }

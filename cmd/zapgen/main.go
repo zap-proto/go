@@ -23,6 +23,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/zap-proto/go/idl"
 	"os"
 	"path/filepath"
 )
@@ -64,7 +65,7 @@ func run(input, outDir, lang string, single bool, typeSuffix string) error {
 	if err != nil {
 		return err
 	}
-	file, err := Parse(input, src)
+	file, err := idl.Parse(input, src)
 	if err != nil {
 		return err
 	}
@@ -75,11 +76,11 @@ func run(input, outDir, lang string, single bool, typeSuffix string) error {
 		// Patch nested-struct references to the renamed types.
 		for _, s := range file.Structs {
 			for _, f := range s.Fields {
-				if f.Type.Kind == KindStruct {
+				if f.Type.Kind == idl.KindStruct {
 					f.Type.StructName += typeSuffix
 				}
-				if f.Type.Kind == KindList && f.Type.ListElem != nil &&
-					f.Type.ListElem.Kind == KindStruct {
+				if f.Type.Kind == idl.KindList && f.Type.ListElem != nil &&
+					f.Type.ListElem.Kind == idl.KindStruct {
 					f.Type.ListElem.StructName += typeSuffix
 				}
 			}
@@ -118,7 +119,7 @@ func run(input, outDir, lang string, single bool, typeSuffix string) error {
 
 // backend picks the pair of emitters for a language. Adding a language is
 // adding a case here and an emitter beside emit.go — never a second parser.
-func backend(lang string) (func(*File) (string, []byte, error), func(*File) (map[string][]byte, error), error) {
+func backend(lang string) (func(*idl.File) (string, []byte, error), func(*idl.File) (map[string][]byte, error), error) {
 	switch lang {
 	case "go":
 		return EmitSingle, Emit, nil
