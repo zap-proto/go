@@ -86,14 +86,14 @@ func (t Base) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(baseBlockchainIDOff, 32))
 	return out
 }
-func (t Base) Outs() zap.List { return t.o.List(baseOutsOff) }
+func (t Base) Outs() zap.List { return t.o.ListStride(baseOutsOff, 4) }
 
 // OutsAt returns element i of Outs. Out of range returns the zero view.
-func (t Base) OutsAt(i int) Ptr { return Ptr{o: t.o.List(baseOutsOff).Object(i, ptrSize)} }
-func (t Base) Ins() zap.List    { return t.o.List(baseInsOff) }
+func (t Base) OutsAt(i int) Ptr { return Ptr{o: t.Outs().Object(i, ptrSize)} }
+func (t Base) Ins() zap.List    { return t.o.ListStride(baseInsOff, 4) }
 
 // InsAt returns element i of Ins. Out of range returns the zero view.
-func (t Base) InsAt(i int) Ptr { return Ptr{o: t.o.List(baseInsOff).Object(i, ptrSize)} }
+func (t Base) InsAt(i int) Ptr { return Ptr{o: t.Ins().Object(i, ptrSize)} }
 func (t Base) Memo() []byte    { return t.o.Bytes(baseMemoOff) }
 
 // BaseInput collects the field values for NewBase.
@@ -220,10 +220,10 @@ func (t Block) Root() [32]byte {
 	copy(out[:], t.o.BytesFixed(blockRootOff, 32))
 	return out
 }
-func (t Block) TxLengths() zap.List { return t.o.List(blockTxLengthsOff) }
+func (t Block) TxLengths() zap.List { return t.o.ListStride(blockTxLengthsOff, 4) }
 
 // TxLengthsAt returns element i of TxLengths. Out of range returns the zero view.
-func (t Block) TxLengthsAt(i int) Ptr { return Ptr{o: t.o.List(blockTxLengthsOff).Object(i, ptrSize)} }
+func (t Block) TxLengthsAt(i int) Ptr { return Ptr{o: t.TxLengths().Object(i, ptrSize)} }
 func (t Block) TxBlob() []byte        { return t.o.Bytes(blockTxBlobOff) }
 
 // BlockInput collects the field values for NewBlock.

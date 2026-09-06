@@ -252,6 +252,31 @@ func validate(s *Struct) error {
 	return nil
 }
 
+// elemWidth is the least a list element of t can weigh. A struct with no
+// tail is its own size; a struct with one is written behind a 4-byte length,
+// so four is its floor; a pointer element is four; a scalar or a fixed run is
+// what it is. Emitted code always knows this, which is what lets the reader
+// refuse a count no buffer of this size could hold.
+func elemWidth(f *File, t Type) int {
+	if t.Kind != KindList || t.ListElem == nil {
+		return 0
+	}
+	e := *t.ListElem
+	switch e.Kind {
+	case KindU8, KindU16, KindU32, KindU64, KindI8, KindI16, KindI32, KindI64,
+		KindF32, KindF64, KindBool, KindBytesFixed:
+		return e.SlotSize()
+	case KindPtr:
+		return 4
+	case KindStruct:
+		if s := f.Find(e.StructName); s != nil && s.Inline() {
+			return structSize(s)
+		}
+		return 4
+	}
+	return 0
+}
+
 func emitOffsets(w *bytes.Buffer, s *Struct) {
 	w.WriteString("const (\n")
 	lower := lowerFirst(s.Name)
@@ -278,7 +303,7 @@ func emitReader(w *bytes.Buffer, f *File, s *Struct) {
 
 	lower := lowerFirst(s.Name)
 	for _, fld := range s.Fields {
-		emitFieldReader(w, s.Name, lower, fld)
+		emitFieldReader(w, f, s.Name, lower, fld)
 		emitElemReader(w, f, s.Name, lower, fld)
 	}
 }
@@ -288,28 +313,37 @@ func emitReader(w *bytes.Buffer, f *File, s *Struct) {
 // sits at i*Size in the list's own run; one with a tail is its own message,
 // and the list holds those end to end.
 func emitElemReader(w *bytes.Buffer, f *File, structName, lower string, fld *Field) {
-	if fld.Type.Kind != KindList || fld.Type.ListElem == nil ||
-		fld.Type.ListElem.Kind != KindStruct {
+	if fld.Type.Kind != KindList || fld.Type.ListElem == nil {
+		return
+	}
+	if aimed := f.PtrElem(fld.Type); aimed != nil {
+		fmt.Fprintf(w, "\n// %sAt returns element i of %s, the object its pointer names.\n",
+			fld.Name, fld.Name)
+		fmt.Fprintf(w, "func (t %s) %sAt(i int) %s { return %s{o: t.%s().ObjectPtr(i)} }\n",
+			structName, fld.Name, aimed.Name, aimed.Name, fld.Name)
+		return
+	}
+	if fld.Type.ListElem.Kind != KindStruct {
 		return
 	}
 	elem := f.Find(fld.Type.ListElem.StructName)
 	if elem == nil {
 		return
 	}
-	offsetConst := fmt.Sprintf("%s%sOff", lower, fld.Name)
 	fmt.Fprintf(w, "\n// %sAt returns element i of %s. Out of range returns the zero view.\n",
 		fld.Name, fld.Name)
 	if elem.Inline() {
-		fmt.Fprintf(w, "func (t %s) %sAt(i int) %s { return %s{o: t.o.List(%s).Object(i, %sSize)} }\n",
-			structName, fld.Name, elem.Name, elem.Name, offsetConst, lowerFirst(elem.Name))
+		fmt.Fprintf(w, "func (t %s) %sAt(i int) %s { return %s{o: t.%s().Object(i, %sSize)} }\n",
+			structName, fld.Name, elem.Name, elem.Name, fld.Name, lowerFirst(elem.Name))
 	} else {
-		fmt.Fprintf(w, "func (t %s) %sAt(i int) %s { return %s{o: t.o.List(%s).ObjectAt(i)} }\n",
-			structName, fld.Name, elem.Name, elem.Name, offsetConst)
+		fmt.Fprintf(w, "func (t %s) %sAt(i int) %s { return %s{o: t.%s().ObjectAt(i)} }\n",
+			structName, fld.Name, elem.Name, elem.Name, fld.Name)
 	}
 }
 
-func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
+func emitFieldReader(w *bytes.Buffer, file *File, structName, lower string, f *Field) {
 	offsetConst := fmt.Sprintf("%s%sOff", lower, f.Name)
+	width := elemWidth(file, f.Type)
 	switch f.Type.Kind {
 	case KindBool:
 		fmt.Fprintf(w, "func (t %s) %s() bool { return t.o.Bool(%s) }\n", structName, f.Name, offsetConst)
@@ -344,7 +378,8 @@ func emitFieldReader(w *bytes.Buffer, structName, lower string, f *Field) {
 		w.WriteString("\treturn out\n")
 		w.WriteString("}\n")
 	case KindList:
-		fmt.Fprintf(w, "func (t %s) %s() zap.List { return t.o.List(%s) }\n", structName, f.Name, offsetConst)
+		fmt.Fprintf(w, "func (t %s) %s() zap.List { return t.o.ListStride(%s, %d) }\n",
+			structName, f.Name, offsetConst, width)
 	case KindStruct:
 		fmt.Fprintf(w, "func (t %s) %s() %s { return %s{o: t.o.Object(%s)} }\n",
 			structName, f.Name, f.Type.StructName, f.Type.StructName, offsetConst)

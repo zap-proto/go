@@ -40,27 +40,23 @@ func (t Spend) BlockchainID() [32]byte {
 	copy(out[:], t.o.BytesFixed(spendBlockchainIDOff, 32))
 	return out
 }
-func (t Spend) Outs() zap.List { return t.o.List(spendOutsOff) }
+func (t Spend) Outs() zap.List { return t.o.ListStride(spendOutsOff, 72) }
 
 // OutsAt returns element i of Outs. Out of range returns the zero view.
-func (t Spend) OutsAt(i int) Out     { return Out{o: t.o.List(spendOutsOff).Object(i, outSize)} }
-func (t Spend) OwnerAddrs() zap.List { return t.o.List(spendOwnerAddrsOff) }
+func (t Spend) OutsAt(i int) Out     { return Out{o: t.Outs().Object(i, outSize)} }
+func (t Spend) OwnerAddrs() zap.List { return t.o.ListStride(spendOwnerAddrsOff, 20) }
 
 // OwnerAddrsAt returns element i of OwnerAddrs. Out of range returns the zero view.
-func (t Spend) OwnerAddrsAt(i int) Addr {
-	return Addr{o: t.o.List(spendOwnerAddrsOff).Object(i, addrSize)}
-}
-func (t Spend) Ins() zap.List { return t.o.List(spendInsOff) }
+func (t Spend) OwnerAddrsAt(i int) Addr { return Addr{o: t.OwnerAddrs().Object(i, addrSize)} }
+func (t Spend) Ins() zap.List           { return t.o.ListStride(spendInsOff, 96) }
 
 // InsAt returns element i of Ins. Out of range returns the zero view.
-func (t Spend) InsAt(i int) In       { return In{o: t.o.List(spendInsOff).Object(i, inSize)} }
-func (t Spend) SigIndices() zap.List { return t.o.List(spendSigIndicesOff) }
+func (t Spend) InsAt(i int) In       { return In{o: t.Ins().Object(i, inSize)} }
+func (t Spend) SigIndices() zap.List { return t.o.ListStride(spendSigIndicesOff, 4) }
 
 // SigIndicesAt returns element i of SigIndices. Out of range returns the zero view.
-func (t Spend) SigIndicesAt(i int) Sig {
-	return Sig{o: t.o.List(spendSigIndicesOff).Object(i, sigSize)}
-}
-func (t Spend) Memo() []byte { return t.o.Bytes(spendMemoOff) }
+func (t Spend) SigIndicesAt(i int) Sig { return Sig{o: t.SigIndices().Object(i, sigSize)} }
+func (t Spend) Memo() []byte           { return t.o.Bytes(spendMemoOff) }
 
 // SpendInput collects the field values for NewSpend.
 type SpendInput struct {
@@ -440,10 +436,10 @@ func (t Block) Parent() [32]byte {
 }
 func (t Block) Height() uint64      { return t.o.Uint64(blockHeightOff) }
 func (t Block) Time() uint64        { return t.o.Uint64(blockTimeOff) }
-func (t Block) TxLengths() zap.List { return t.o.List(blockTxLengthsOff) }
+func (t Block) TxLengths() zap.List { return t.o.ListStride(blockTxLengthsOff, 4) }
 
 // TxLengthsAt returns element i of TxLengths. Out of range returns the zero view.
-func (t Block) TxLengthsAt(i int) Sig { return Sig{o: t.o.List(blockTxLengthsOff).Object(i, sigSize)} }
+func (t Block) TxLengthsAt(i int) Sig { return Sig{o: t.TxLengths().Object(i, sigSize)} }
 func (t Block) TxBlob() []byte        { return t.o.Bytes(blockTxBlobOff) }
 func (t Block) ProposalTx() []byte    { return t.o.Bytes(blockProposalTxOff) }
 

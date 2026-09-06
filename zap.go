@@ -352,6 +352,19 @@ func (o Object) Object(fieldOffset int) Object {
 // length=0xFFFFFFFF would otherwise let a downstream `for i := 0; i < Len()`
 // loop iterate 4G times even though every per-element accessor returns 0.
 func (o Object) List(fieldOffset int) List {
+	return o.ListStride(fieldOffset, 0)
+}
+
+// ListStride reads a list whose elements are at least stride bytes wide.
+//
+// The width buys the tight test — a declared count no buffer of this size
+// could hold is refused here, once, instead of at every element read. Without
+// it a peer's 0xFFFFFFFF only has to be smaller than the message for every
+// `for i := 0; i < Len()` loop to run that many times and every make(_, Len())
+// to ask for that much memory, even though each element answers zero. A caller
+// that does not know the width passes 0 and gets that weaker bound. Code
+// emitted from a schema always knows the width.
+func (o Object) ListStride(fieldOffset, stride int) List {
 	d := o.buf()
 	pos := o.offset + fieldOffset
 	if pos+8 > len(d) {
@@ -363,25 +376,22 @@ func (o Object) List(fieldOffset int) List {
 		return List{} // Null
 	}
 
-	length := binary.LittleEndian.Uint32(d[pos+4:])
-
-	// Clamp length to the message size. The tightest bound is
-	// length*minElementSize, but element size is per-list-accessor (Uint8 is
-	// 1B, Uint32 is 4B, struct lists carry their own stride). The wire layer
-	// cannot know the stride, so use the permissive `length <= len(data)`
-	// baseline — every per-element accessor re-checks its own bounds. This
-	// rejects the 0xFFFFFFFF DoS without false-rejecting honest 1-byte-stride
-	// lists that span the entire message.
-	if int(length) > len(d) {
-		return List{}
-	}
+	length := int(binary.LittleEndian.Uint32(d[pos+4:]))
 
 	absOffset := pos + int(relOffset)
 	if absOffset < HeaderSize || absOffset >= len(d) {
 		return List{}
 	}
 
-	return List{msg: o.msg, offset: absOffset, length: int(length)}
+	if stride > 0 {
+		if length > (len(d)-absOffset)/stride {
+			return List{}
+		}
+	} else if length > len(d) {
+		return List{}
+	}
+
+	return List{msg: o.msg, offset: absOffset, length: length}
 }
 
 // List is a zero-copy view into a ZAP list.

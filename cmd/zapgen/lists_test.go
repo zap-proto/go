@@ -51,14 +51,21 @@ func emitBoth(t *testing.T, src string) (string, string) {
 
 func TestListElementShapes(t *testing.T) {
 	goSrc, rustSrc := emitBoth(t, threeLists)
+	// gofmt aligns neighbouring one-line functions, so compare the Go half
+	// with its runs of spaces squeezed out.
+	goSrc = strings.Join(strings.Fields(goSrc), " ")
 	for _, want := range []string{
 		"recordsLB.AddBytes(elem)",
 		"entriesLB.AddObjectBytes(elem)",
 		"aimedLB.AddObjectPtr(at)",
+		"func (t Holder) AimedAt(i int) Deep { return Deep{o: t.Aimed().ObjectPtr(i)} }",
+		"func (t Holder) Records() zap.List { return t.o.ListStride(holderRecordsOff, 8) }",
+		"func (t Holder) Entries() zap.List { return t.o.ListStride(holderEntriesOff, 4) }",
+		"func (t Holder) Aimed() zap.List { return t.o.ListStride(holderAimedOff, 4) }",
 		"offsAimed = append(offsAimed, PutDeep(b, elem))",
-		"Aimed   []DeepInput",
-		"func (t Holder) RecordsAt(i int) Flat { return Flat{o: t.o.List(holderRecordsOff).Object(i, flatSize)} }",
-		"func (t Holder) EntriesAt(i int) Deep { return Deep{o: t.o.List(holderEntriesOff).ObjectAt(i)} }",
+		"Aimed []DeepInput",
+		"func (t Holder) RecordsAt(i int) Flat { return Flat{o: t.Records().Object(i, flatSize)} }",
+		"func (t Holder) EntriesAt(i int) Deep { return Deep{o: t.Entries().ObjectAt(i)} }",
 	} {
 		if !strings.Contains(goSrc, want) {
 			t.Errorf("Go emit is missing %q\n%s", want, goSrc)
@@ -68,10 +75,13 @@ func TestListElementShapes(t *testing.T) {
 		"list_records.add_bytes(b, elem);",
 		"list_entries.add_object_bytes(b, elem);",
 		"list_aimed.add_object_ptr(b, *at);",
+		"Deep::new(self.aimed().object_ptr(i))",
+		"self.o.list_stride(HOLDER_RECORDS, 8)",
+		"self.o.list_stride(HOLDER_ENTRIES, 4)",
 		"offs_aimed.push(put_deep(b, elem));",
 		"pub aimed: &'a [DeepInput<'a>],",
-		"Flat::new(self.o.list(HOLDER_RECORDS).object(i, FLAT_SIZE))",
-		"Deep::new(self.o.list(HOLDER_ENTRIES).object_at(i))",
+		"Flat::new(self.records().object(i, FLAT_SIZE))",
+		"Deep::new(self.entries().object_at(i))",
 	} {
 		if !strings.Contains(rustSrc, want) {
 			t.Errorf("Rust emit is missing %q\n%s", want, rustSrc)

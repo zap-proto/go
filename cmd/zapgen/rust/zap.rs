@@ -312,10 +312,23 @@ impl<'a> Object<'a> {
         }
     }
 
-    /// The list `field` points at. The pointer is SIGNED, as for an object.
-    /// The declared length is clamped to the message size: a forged count
-    /// must not hand a caller a four-billion-iteration loop.
+    /// The list `field` points at, with no statement about how wide an
+    /// element is. The pointer is SIGNED, as for an object.
     pub fn list(&self, field: usize) -> List<'a> {
+        self.list_stride(field, 0)
+    }
+
+    /// The list `field` points at, whose elements are at least `stride` bytes
+    /// wide.
+    ///
+    /// The width buys the tight test — a declared count no buffer of this
+    /// size could hold is refused here, once, instead of at every element
+    /// read. Without it a peer's 0xFFFFFFFF only has to be smaller than the
+    /// message for every `for i in 0..len` loop to run that many times and
+    /// every `with_capacity(len)` to ask for that much memory, even though
+    /// each element answers zero. A caller that does not know the width
+    /// passes 0 and gets that weaker bound.
+    pub fn list_stride(&self, field: usize, stride: usize) -> List<'a> {
         let pos = self.offset + field;
         if pos + 8 > self.data.len() {
             return List::null();
@@ -325,16 +338,21 @@ impl<'a> Object<'a> {
             return List::null();
         }
         let length = u32_at(self.data, pos + 4) as usize;
-        if length > self.data.len() {
-            return List::null();
-        }
         let abs = pos as i64 + rel as i64;
         if abs < HEADER_SIZE as i64 || abs >= self.data.len() as i64 {
             return List::null();
         }
+        let abs = abs as usize;
+        if stride > 0 {
+            if length.saturating_mul(stride) > self.data.len() - abs {
+                return List::null();
+            }
+        } else if length > self.data.len() {
+            return List::null();
+        }
         List {
             data: self.data,
-            offset: abs as usize,
+            offset: abs,
             length,
             present: true,
         }

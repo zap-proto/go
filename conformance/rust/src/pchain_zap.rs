@@ -65,39 +65,39 @@ impl<'a> Spend<'a> {
     }
 
     pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(SPEND_OUTS)
+        self.o.list_stride(SPEND_OUTS, 72)
     }
 
     /// Element `i` of `outs`. Out of range answers the zero view.
     pub fn outs_at(&self, i: usize) -> Out<'a> {
-        Out::new(self.o.list(SPEND_OUTS).object(i, OUT_SIZE))
+        Out::new(self.outs().object(i, OUT_SIZE))
     }
 
     pub fn owner_addrs(&self) -> zap::List<'a> {
-        self.o.list(SPEND_OWNER_ADDRS)
+        self.o.list_stride(SPEND_OWNER_ADDRS, 20)
     }
 
     /// Element `i` of `owner_addrs`. Out of range answers the zero view.
     pub fn owner_addrs_at(&self, i: usize) -> Addr<'a> {
-        Addr::new(self.o.list(SPEND_OWNER_ADDRS).object(i, ADDR_SIZE))
+        Addr::new(self.owner_addrs().object(i, ADDR_SIZE))
     }
 
     pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(SPEND_INS)
+        self.o.list_stride(SPEND_INS, 96)
     }
 
     /// Element `i` of `ins`. Out of range answers the zero view.
     pub fn ins_at(&self, i: usize) -> In<'a> {
-        In::new(self.o.list(SPEND_INS).object(i, IN_SIZE))
+        In::new(self.ins().object(i, IN_SIZE))
     }
 
     pub fn sig_indices(&self) -> zap::List<'a> {
-        self.o.list(SPEND_SIG_INDICES)
+        self.o.list_stride(SPEND_SIG_INDICES, 4)
     }
 
     /// Element `i` of `sig_indices`. Out of range answers the zero view.
     pub fn sig_indices_at(&self, i: usize) -> Sig<'a> {
-        Sig::new(self.o.list(SPEND_SIG_INDICES).object(i, SIG_SIZE))
+        Sig::new(self.sig_indices().object(i, SIG_SIZE))
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -686,12 +686,12 @@ impl<'a> Block<'a> {
     }
 
     pub fn tx_lengths(&self) -> zap::List<'a> {
-        self.o.list(BLOCK_TX_LENGTHS)
+        self.o.list_stride(BLOCK_TX_LENGTHS, 4)
     }
 
     /// Element `i` of `tx_lengths`. Out of range answers the zero view.
     pub fn tx_lengths_at(&self, i: usize) -> Sig<'a> {
-        Sig::new(self.o.list(BLOCK_TX_LENGTHS).object(i, SIG_SIZE))
+        Sig::new(self.tx_lengths().object(i, SIG_SIZE))
     }
 
     pub fn tx_blob(&self) -> &'a [u8] {

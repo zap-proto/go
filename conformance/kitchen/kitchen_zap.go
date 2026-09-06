@@ -104,10 +104,10 @@ func (t All) Id() [16]byte {
 	copy(out[:], t.o.BytesFixed(allIdOff, 16))
 	return out
 }
-func (t All) Items() zap.List { return t.o.List(allItemsOff) }
+func (t All) Items() zap.List { return t.o.ListStride(allItemsOff, 4) }
 
 // ItemsAt returns element i of Items. Out of range returns the zero view.
-func (t All) ItemsAt(i int) Leaf { return Leaf{o: t.o.List(allItemsOff).ObjectAt(i)} }
+func (t All) ItemsAt(i int) Leaf { return Leaf{o: t.Items().ObjectAt(i)} }
 func (t All) Inner() Leaf        { return Leaf{o: t.o.Object(allInnerOff)} }
 
 // AllInput collects the field values for NewAll.

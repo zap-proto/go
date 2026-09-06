@@ -193,12 +193,12 @@ impl<'a> All<'a> {
     }
 
     pub fn items(&self) -> zap::List<'a> {
-        self.o.list(ALL_ITEMS)
+        self.o.list_stride(ALL_ITEMS, 4)
     }
 
     /// Element `i` of `items`. Out of range answers the zero view.
     pub fn items_at(&self, i: usize) -> Leaf<'a> {
-        Leaf::new(self.o.list(ALL_ITEMS).object_at(i))
+        Leaf::new(self.items().object_at(i))
     }
 
     pub fn inner(&self) -> Leaf<'a> {

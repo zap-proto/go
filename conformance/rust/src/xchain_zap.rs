@@ -142,21 +142,21 @@ impl<'a> Base<'a> {
     }
 
     pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(BASE_OUTS)
+        self.o.list_stride(BASE_OUTS, 4)
     }
 
     /// Element `i` of `outs`. Out of range answers the zero view.
     pub fn outs_at(&self, i: usize) -> Ptr<'a> {
-        Ptr::new(self.o.list(BASE_OUTS).object(i, PTR_SIZE))
+        Ptr::new(self.outs().object(i, PTR_SIZE))
     }
 
     pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(BASE_INS)
+        self.o.list_stride(BASE_INS, 4)
     }
 
     /// Element `i` of `ins`. Out of range answers the zero view.
     pub fn ins_at(&self, i: usize) -> Ptr<'a> {
-        Ptr::new(self.o.list(BASE_INS).object(i, PTR_SIZE))
+        Ptr::new(self.ins().object(i, PTR_SIZE))
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -354,12 +354,12 @@ impl<'a> Block<'a> {
     }
 
     pub fn tx_lengths(&self) -> zap::List<'a> {
-        self.o.list(BLOCK_TX_LENGTHS)
+        self.o.list_stride(BLOCK_TX_LENGTHS, 4)
     }
 
     /// Element `i` of `tx_lengths`. Out of range answers the zero view.
     pub fn tx_lengths_at(&self, i: usize) -> Ptr<'a> {
-        Ptr::new(self.o.list(BLOCK_TX_LENGTHS).object(i, PTR_SIZE))
+        Ptr::new(self.tx_lengths().object(i, PTR_SIZE))
     }
 
     pub fn tx_blob(&self) -> &'a [u8] {

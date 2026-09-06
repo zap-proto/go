@@ -155,7 +155,7 @@ func emitRustReader(w *bytes.Buffer, f *File, s *Struct) {
 	prefix := screamCase(s.Name)
 	for _, fld := range s.Fields {
 		w.WriteString("\n")
-		emitRustFieldReader(w, prefix, fld)
+		emitRustFieldReader(w, f, prefix, fld)
 		emitRustElemReader(w, f, prefix, fld)
 	}
 	w.WriteString("}\n\n")
@@ -166,28 +166,36 @@ func emitRustReader(w *bytes.Buffer, f *File, s *Struct) {
 // element sits at i*Size in the list's own run; one with a tail is its own
 // message, and the list holds those end to end.
 func emitRustElemReader(w *bytes.Buffer, f *File, prefix string, fld *Field) {
-	if fld.Type.Kind != KindList || fld.Type.ListElem == nil ||
-		fld.Type.ListElem.Kind != KindStruct {
+	if fld.Type.Kind != KindList || fld.Type.ListElem == nil {
+		return
+	}
+	name := rustIdent(snakeCase2(fld.Name))
+	if aimed := f.PtrElem(fld.Type); aimed != nil {
+		fmt.Fprintf(w, "\n    /// Element `i` of `%s`, the object its pointer names.\n", name)
+		fmt.Fprintf(w, "    pub fn %s_at(&self, i: usize) -> %s<'a> {\n", name, aimed.Name)
+		fmt.Fprintf(w, "        %s::new(self.%s().object_ptr(i))\n", aimed.Name, name)
+		w.WriteString("    }\n")
+		return
+	}
+	if fld.Type.ListElem.Kind != KindStruct {
 		return
 	}
 	elem := f.Find(fld.Type.ListElem.StructName)
 	if elem == nil {
 		return
 	}
-	off := prefix + "_" + screamCase(fld.Name)
-	name := rustIdent(snakeCase2(fld.Name))
 	fmt.Fprintf(w, "\n    /// Element `i` of `%s`. Out of range answers the zero view.\n", name)
 	fmt.Fprintf(w, "    pub fn %s_at(&self, i: usize) -> %s<'a> {\n", name, elem.Name)
 	if elem.Inline() {
-		fmt.Fprintf(w, "        %s::new(self.o.list(%s).object(i, %s_SIZE))\n",
-			elem.Name, off, screamCase(elem.Name))
+		fmt.Fprintf(w, "        %s::new(self.%s().object(i, %s_SIZE))\n",
+			elem.Name, name, screamCase(elem.Name))
 	} else {
-		fmt.Fprintf(w, "        %s::new(self.o.list(%s).object_at(i))\n", elem.Name, off)
+		fmt.Fprintf(w, "        %s::new(self.%s().object_at(i))\n", elem.Name, name)
 	}
 	w.WriteString("    }\n")
 }
 
-func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
+func emitRustFieldReader(w *bytes.Buffer, file *File, prefix string, f *Field) {
 	off := prefix + "_" + screamCase(f.Name)
 	name := rustIdent(snakeCase2(f.Name))
 	switch f.Type.Kind {
@@ -211,7 +219,8 @@ func emitRustFieldReader(w *bytes.Buffer, prefix string, f *Field) {
 		fmt.Fprintf(w, "            .unwrap_or(&[0u8; %d])\n", n)
 		w.WriteString("    }\n")
 	case KindList:
-		fmt.Fprintf(w, "    pub fn %s(&self) -> zap::List<'a> {\n        self.o.list(%s)\n    }\n", name, off)
+		fmt.Fprintf(w, "    pub fn %s(&self) -> zap::List<'a> {\n        self.o.list_stride(%s, %d)\n    }\n",
+			name, off, elemWidth(file, f.Type))
 	case KindStruct:
 		fmt.Fprintf(w, "    pub fn %s(&self) -> %s<'a> {\n        %s::new(self.o.object(%s))\n    }\n",
 			name, f.Type.StructName, f.Type.StructName, off)

@@ -58,11 +58,11 @@ impl<'a> BaseTx<'a> {
     }
 
     pub fn outs(&self) -> zap::List<'a> {
-        self.o.list(BASE_TX_OUTS)
+        self.o.list_stride(BASE_TX_OUTS, 4)
     }
 
     pub fn ins(&self) -> zap::List<'a> {
-        self.o.list(BASE_TX_INS)
+        self.o.list_stride(BASE_TX_INS, 4)
     }
 
     pub fn memo(&self) -> &'a [u8] {
