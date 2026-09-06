@@ -18,7 +18,33 @@ Three sibling packages ship alongside the root codec:
   method-ordinal table. Brace and whitespace-significant DSL, one parser.
   `-lang go` (default) emits Go against this runtime; `-lang cpp` emits
   headers against `github.com/zap-proto/cpp`. One front end, one schema
-  model, one emitter per language.
+  model, one emitter per language, and both emit the same bytes from one
+  schema.
+
+  A list's ENCODING is derived from its element type, never declared: a
+  number is a run of numbers at its own width; `bytes_fixed[N]` is those
+  runs back to back; a struct with no tail is its payload back to back at
+  its own width; a struct WITH a tail becomes a run of 4-byte signed
+  relative pointers, because its tail has nowhere to go between two
+  neighbours. `bytes` and `text` have no width, so a run of them is
+  refused rather than invented.
+
+  Every payload a struct points at is written BEFORE the struct's own
+  object — whole objects first, then the runs over them, each in field
+  order. That is the order the Lux reference writes in, and the order
+  decides the bytes. An empty list writes nothing at all; the alignment
+  pad a started-then-discarded list leaves behind would move every byte
+  after it.
+
+  Three entry points per struct, because a struct sits in three places:
+  `New` for a message of its own, `Append` for an object inside somebody
+  else's message, `Encode` for one element of an inline run. Readers take
+  the stride the schema knows, so a lying length word is refused once
+  instead of at every element.
+
+  `struct Name @N` states the fixed section's width when the wire reserves
+  more than the fields fill. `package a.b.c` is one path: C++ opens the
+  nested namespace, Go takes the last segment.
 - `rpc` — the ZAP call envelope (`BuildRequest`/`ParseRequest`,
   `BuildResponse`/`ParseResponse`, `Call`, `Response`, status codes). The
   wire contract the generated client/server ride; byte-compatible with the

@@ -46,9 +46,11 @@ type Param struct {
 	StructName string
 }
 
-// Struct is one declared struct.
+// Struct is one declared struct. Size is the author's stated width for the
+// fixed section, and zero when the schema leaves it to the fields.
 type Struct struct {
 	Name   string
+	Size   int
 	Fields []*Field
 }
 

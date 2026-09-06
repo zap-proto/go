@@ -118,3 +118,65 @@ struct S {
 		t.Error("emitted C++ for a list of an undeclared struct")
 	}
 }
+
+// TestAStatedWidthIsTheWidth: a record may reserve more than its fields use —
+// the X-chain's NFTMintOperation reserves 36 bytes for fields that end at 32 —
+// and the emitted size has to be what the wire reserves, not where the fields
+// happen to stop.
+func TestAStatedWidthIsTheWidth(t *testing.T) {
+	file, err := Parse("t.zap", []byte(`package p
+struct Wide @36 {
+    A u64 @0
+    B u64 @8
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := structSize(file.Structs[0]); got != 36 {
+		t.Errorf("size = %d, want the stated 36", got)
+	}
+	if _, _, err := EmitCPPSingle(file); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A stated width narrower than the fields is a contradiction, not a layout.
+func TestAStatedWidthCannotCutTheFieldsShort(t *testing.T) {
+	file, err := Parse("t.zap", []byte(`package p
+struct Short @8 {
+    A u64 @0
+    B u64 @8
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := EmitCPPSingle(file); err == nil {
+		t.Error("emitted a struct whose stated width cuts its last field in half")
+	}
+}
+
+// TestPackagePathNestsInCppAndNotInGo: one path, rendered by each backend the
+// way that language spells a namespace.
+func TestPackagePathNestsInCppAndNotInGo(t *testing.T) {
+	file, err := Parse("t.zap", []byte(`package lux.xvm.wire
+struct S {
+    A u64 @0
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpp, _, err := emitSingleString(EmitCPPSingle, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cpp, "namespace lux::xvm::wire {") {
+		t.Error("C++ output does not open the nested namespace")
+	}
+	goSrc, _, err := emitSingleString(EmitSingle, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(goSrc, "package wire\n") {
+		t.Error("Go output does not take the last segment as the package name")
+	}
+}

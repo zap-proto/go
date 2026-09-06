@@ -159,7 +159,7 @@ func (p *parser) expect(lit string) error {
 // parseFile is the top-level entry. Grammar:
 //
 //	File   := PackageDecl (TypeAlias | Struct)*
-//	PackageDecl := 'package' Ident
+//	PackageDecl := 'package' Ident ('.' Ident)*
 func (p *parser) parseFile() (*File, error) {
 	p.skipSpace()
 	if !p.peekKeyword("package") {
@@ -170,6 +170,17 @@ func (p *parser) parseFile() (*File, error) {
 	name, ok := p.readIdent()
 	if !ok {
 		return nil, p.errf("expected package name after `package`")
+	}
+	// A dotted path, because a namespace nests and a package does not. Each
+	// backend renders the one path its own way: C++ opens all of it, Go takes
+	// the last segment, which is what a Go package name is.
+	for p.pos < len(p.src) && p.src[p.pos] == '.' {
+		p.pos++
+		seg, ok := p.readIdent()
+		if !ok {
+			return nil, p.errf("expected a name after `.` in the package path")
+		}
+		name += "." + seg
 	}
 	p.file.Package = name
 
@@ -235,10 +246,24 @@ func (p *parser) parseStruct() (*Struct, error) {
 		return nil, p.errf("expected struct name")
 	}
 	p.skipSpace()
+	// `struct Name @N` states the fixed section's width when it is wider than
+	// the fields — a record whose stride the wire reserves and the fields do
+	// not fill. Left out, the width is where the last field ends.
+	size := 0
+	if p.pos < len(p.src) && p.src[p.pos] == '@' {
+		p.pos++
+		p.skipSpace()
+		n, err := p.readInt()
+		if err != nil {
+			return nil, err
+		}
+		size = n
+		p.skipSpace()
+	}
 	if err := p.expect("{"); err != nil {
 		return nil, err
 	}
-	s := &Struct{Name: name}
+	s := &Struct{Name: name, Size: size}
 	for {
 		p.skipSpace()
 		if p.pos >= len(p.src) {

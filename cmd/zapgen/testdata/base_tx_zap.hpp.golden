@@ -90,20 +90,20 @@ inline std::int64_t AppendBaseTx(zap::Builder& b, const BaseTxInput& in);
 // AppendBaseTx writes one BaseTx object into b — every payload it points at first,
 // then the object itself — and returns the object's offset.
 inline std::int64_t AppendBaseTx(zap::Builder& b, const BaseTxInput& in) {
+    std::vector<std::int64_t> outs_ptrs;
+    outs_ptrs.reserve(in.Outs.size());
+    for (const auto& elem : in.Outs) outs_ptrs.push_back(AppendTransfer(b, elem));
+    std::vector<std::int64_t> ins_ptrs;
+    ins_ptrs.reserve(in.Ins.size());
+    for (const auto& elem : in.Ins) ins_ptrs.push_back(AppendSpend(b, elem));
     std::int64_t outs_off = 0;
     if (!in.Outs.empty()) {
-        std::vector<std::int64_t> outs_ptrs;
-        outs_ptrs.reserve(in.Outs.size());
-        for (const auto& elem : in.Outs) outs_ptrs.push_back(AppendTransfer(b, elem));
         auto lb = b.start_list(4);
         for (const auto off : outs_ptrs) lb.add_object_ptr(off);
         outs_off = lb.finish().first;
     }
     std::int64_t ins_off = 0;
     if (!in.Ins.empty()) {
-        std::vector<std::int64_t> ins_ptrs;
-        ins_ptrs.reserve(in.Ins.size());
-        for (const auto& elem : in.Ins) ins_ptrs.push_back(AppendSpend(b, elem));
         auto lb = b.start_list(4);
         for (const auto off : ins_ptrs) lb.add_object_ptr(off);
         ins_off = lb.finish().first;
@@ -120,20 +120,20 @@ inline std::int64_t AppendBaseTx(zap::Builder& b, const BaseTxInput& in) {
 // NewBaseTx writes a ZAP-encoded BaseTx message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewBaseTx(const BaseTxInput& in) {
     zap::Builder b(256, zap::kVersion2);
+    std::vector<std::int64_t> outs_ptrs;
+    outs_ptrs.reserve(in.Outs.size());
+    for (const auto& elem : in.Outs) outs_ptrs.push_back(AppendTransfer(b, elem));
+    std::vector<std::int64_t> ins_ptrs;
+    ins_ptrs.reserve(in.Ins.size());
+    for (const auto& elem : in.Ins) ins_ptrs.push_back(AppendSpend(b, elem));
     std::int64_t outs_off = 0;
     if (!in.Outs.empty()) {
-        std::vector<std::int64_t> outs_ptrs;
-        outs_ptrs.reserve(in.Outs.size());
-        for (const auto& elem : in.Outs) outs_ptrs.push_back(AppendTransfer(b, elem));
         auto lb = b.start_list(4);
         for (const auto off : outs_ptrs) lb.add_object_ptr(off);
         outs_off = lb.finish().first;
     }
     std::int64_t ins_off = 0;
     if (!in.Ins.empty()) {
-        std::vector<std::int64_t> ins_ptrs;
-        ins_ptrs.reserve(in.Ins.size());
-        for (const auto& elem : in.Ins) ins_ptrs.push_back(AppendSpend(b, elem));
         auto lb = b.start_list(4);
         for (const auto off : ins_ptrs) lb.add_object_ptr(off);
         ins_off = lb.finish().first;

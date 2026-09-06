@@ -36,6 +36,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
 
 // cppBuilderVersion is the wire version the generated C++ builder writes.
@@ -237,12 +238,17 @@ func writeCPPIncludes(w *bytes.Buffer, f *File, s *Struct) {
 	}
 }
 
+// cppNamespace renders the package path as the nested namespace it is.
+func cppNamespace(f *File) string {
+	return strings.ReplaceAll(f.Package, ".", "::")
+}
+
 func writeCPPOpen(w *bytes.Buffer, f *File) {
-	fmt.Fprintf(w, "\nnamespace %s {\n\n", f.Package)
+	fmt.Fprintf(w, "\nnamespace %s {\n\n", cppNamespace(f))
 }
 
 func writeCPPClose(w *bytes.Buffer, f *File) {
-	fmt.Fprintf(w, "}  // namespace %s\n", f.Package)
+	fmt.Fprintf(w, "}  // namespace %s\n", cppNamespace(f))
 }
 
 // writeCPPForwards declares every class up front so a struct may name one
@@ -292,7 +298,7 @@ func emitCPPStruct(w *bytes.Buffer, f *File, s *Struct) {
 // name says which is meant; Go has no such collision, so this is a place the
 // two emitters honestly differ.
 func cppTypeName(f *File, name string) string {
-	return "::" + f.Package + "::" + name
+	return "::" + cppNamespace(f) + "::" + name
 }
 
 func emitCPPOffsets(w *bytes.Buffer, s *Struct) {
@@ -555,8 +561,14 @@ func emitCPPNew(w *bytes.Buffer, file *File, s *Struct) {
 // emitCPPBody writes the payloads, opens the object, and sets every field. It
 // leaves `ob` in scope for the caller to finish.
 func emitCPPBody(w *bytes.Buffer, file *File, s *Struct) {
+	// Objects first, runs second, each in field order. That is the order the
+	// Lux reference writes in — every element of every pointer list, then the
+	// pointer runs over them — and the order decides the bytes.
 	for _, f := range s.Fields {
-		emitCPPPayload(w, file, s, f)
+		emitCPPPayload(w, file, s, f, payloadObjects)
+	}
+	for _, f := range s.Fields {
+		emitCPPPayload(w, file, s, f, payloadRuns)
 	}
 	fmt.Fprintf(w, "    auto ob = b.start_object(%s);\n", cppSizeName(s))
 	for _, f := range s.Fields {
@@ -571,9 +583,20 @@ func cppPayloadVar(f *Field) string { return lowerFirst(f.Name) + "_off" }
 // An empty list writes nothing at all: the reference leaves the pointer pair
 // null and does not align, and an alignment pad nobody asked for would move
 // every byte after it.
-func emitCPPPayload(w *bytes.Buffer, file *File, s *Struct, f *Field) {
+// pass says which half of the payload write this call emits.
+type pass int
+
+const (
+	payloadObjects pass = iota // whole objects: pointer-list elements, nested structs
+	payloadRuns                // list runs, including the pointer runs over those objects
+)
+
+func emitCPPPayload(w *bytes.Buffer, file *File, s *Struct, f *Field, p pass) {
 	switch f.Type.Kind {
 	case KindStruct:
+		if p != payloadObjects {
+			return
+		}
 		v := cppPayloadVar(f)
 		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
 		fmt.Fprintf(w, "    if (in.%s) %s = Append%s(b, *in.%s);\n",
@@ -582,20 +605,28 @@ func emitCPPPayload(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 		elem := *f.Type.ListElem
 		v := cppPayloadVar(f)
 		stride := file.Stride(elem)
-		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
-		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
 		if file.Shape(elem) == ShapePointer {
 			ptrs := lowerFirst(f.Name) + "_ptrs"
-			fmt.Fprintf(w, "        std::vector<std::int64_t> %s;\n", ptrs)
-			fmt.Fprintf(w, "        %s.reserve(in.%s.size());\n", ptrs, f.Name)
-			fmt.Fprintf(w, "        for (const auto& elem : in.%s) %s.push_back(Append%s(b, elem));\n",
-				f.Name, ptrs, elem.StructName)
+			if p == payloadObjects {
+				fmt.Fprintf(w, "    std::vector<std::int64_t> %s;\n", ptrs)
+				fmt.Fprintf(w, "    %s.reserve(in.%s.size());\n", ptrs, f.Name)
+				fmt.Fprintf(w, "    for (const auto& elem : in.%s) %s.push_back(Append%s(b, elem));\n",
+					f.Name, ptrs, elem.StructName)
+				return
+			}
+			fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
+			fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
 			fmt.Fprintf(w, "        auto lb = b.start_list(%d);\n", stride)
 			fmt.Fprintf(w, "        for (const auto off : %s) lb.add_object_ptr(off);\n", ptrs)
 			fmt.Fprintf(w, "        %s = lb.finish().first;\n", v)
 			w.WriteString("    }\n")
 			return
 		}
+		if p != payloadRuns {
+			return
+		}
+		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", v)
+		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
 		fmt.Fprintf(w, "        auto lb = b.start_list(%d);\n", stride)
 		switch file.Shape(elem) {
 		case ShapeFixed:
