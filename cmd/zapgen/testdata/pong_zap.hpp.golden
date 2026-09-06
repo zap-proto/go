@@ -31,6 +31,9 @@ class Pong {
 
     std::uint64_t Seq() const { return o_.u64(kPongSeqOff); }
 
+    // The kPongSize bytes this Pong occupies where it lies.
+    std::span<const std::uint8_t> Record() const { return o_.bytes_fixed(0, kPongSize); }
+
   private:
     zap::Object o_;
 };
@@ -51,7 +54,7 @@ struct PongInput {
 
 // NewPong writes a ZAP-encoded Pong message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewPong(const PongInput& in) {
-    zap::Builder b(256, zap::kVersion1);
+    zap::Builder b(256, zap::kVersion2);
     auto ob = b.start_object(kPongSize);
     ob.set_u64(kPongSeqOff, in.Seq);
     ob.finish_as_root();

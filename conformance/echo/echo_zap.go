@@ -29,6 +29,9 @@ func WrapPing(b []byte) (Ping, error) {
 
 func (t Ping) Seq() uint64 { return t.o.Uint64(pingSeqOff) }
 
+// Record is the pingSize bytes this Ping occupies where it lies.
+func (t Ping) Record() []byte { return t.o.BytesFixed(0, pingSize) }
+
 // PingInput collects the field values for NewPing.
 type PingInput struct {
 	Seq uint64
@@ -62,6 +65,9 @@ func WrapPong(b []byte) (Pong, error) {
 }
 
 func (t Pong) Seq() uint64 { return t.o.Uint64(pongSeqOff) }
+
+// Record is the pongSize bytes this Pong occupies where it lies.
+func (t Pong) Record() []byte { return t.o.BytesFixed(0, pongSize) }
 
 // PongInput collects the field values for NewPong.
 type PongInput struct {

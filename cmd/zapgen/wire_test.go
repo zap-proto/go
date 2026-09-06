@@ -175,3 +175,59 @@ func emitGo(t *testing.T, f *File) string {
 	}
 	return string(body)
 }
+
+// TestEveryBackendStampsTheSameVersion — the wire version is spelled, not
+// defaulted, because the runtimes default differently: zap.NewBuilder writes
+// version 1 and zap::Builder writes version 2. A generated builder that took
+// either default would put a different header on one schema in each language.
+// Two is what every Lux message on the wire carries, so two is what every
+// backend stamps.
+func TestEveryBackendStampsTheSameVersion(t *testing.T) {
+	f := shapeFile(t)
+	for _, tc := range []struct{ lang, want string }{
+		{"go", "zap.NewBuilderV2(256)"},
+		{"rust", "zap::Builder::new_v2(256)"},
+		{"cpp", "zap::Builder b(256, zap::kVersion2)"},
+	} {
+		files, err := emit(f, tc.lang, defaultRustRuntime, true)
+		if err != nil {
+			t.Fatalf("emit %s: %v", tc.lang, err)
+		}
+		found := false
+		for _, body := range files {
+			if strings.Contains(string(body), tc.want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the %s backend does not stamp %q", tc.lang, tc.want)
+		}
+	}
+}
+
+// TestEveryBackendWritesTheSameStride — the shape is decided once, in the
+// front end, so a backend cannot reach a different answer. Each spells the
+// width in its own idiom and every spelling names the element's own size.
+func TestEveryBackendWritesTheSameStride(t *testing.T) {
+	f := shapeFile(t)
+	for _, tc := range []struct{ lang, stride, prefixed string }{
+		{"go", "b.StartList(recSize)", "lb.AddObjectBytes(elem)"},
+		{"rust", "let mut rec = [0u8; REC_SIZE];", "lb.add_object_bytes(&mut b, elem);"},
+		{"cpp", "b.start_list(kRecSize)", "lb.add_u32(static_cast<std::uint32_t>(elem.size()));"},
+	} {
+		files, err := emit(f, tc.lang, defaultRustRuntime, true)
+		if err != nil {
+			t.Fatalf("emit %s: %v", tc.lang, err)
+		}
+		var all string
+		for _, body := range files {
+			all += string(body)
+		}
+		if !strings.Contains(all, tc.stride) {
+			t.Errorf("the %s backend does not write a record at its own width: want %q", tc.lang, tc.stride)
+		}
+		if !strings.Contains(all, tc.prefixed) {
+			t.Errorf("the %s backend does not write a tailed element behind its length: want %q", tc.lang, tc.prefixed)
+		}
+	}
+}

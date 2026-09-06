@@ -105,21 +105,6 @@ func TestBackendsShareOneModel(t *testing.T) {
 	}
 }
 
-// TestCPPWritesTheSameWireVersionAsGo pins the one place the two runtimes
-// disagree by default: zap.NewBuilder writes version 1 and zap::Builder writes
-// version 2, so the generated C++ has to name the version or the two builders
-// emit different headers from one schema.
-func TestCPPWritesTheSameWireVersionAsGo(t *testing.T) {
-	file := parseFile(t, "testdata/basetx.zap")
-	src, _, err := emitSingleString(EmitCPPSingle, file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(src, "zap::Builder b(256, zap::kVersion1)") {
-		t.Error("generated C++ builder does not pin the Go builder's wire version")
-	}
-}
-
 // TestCPPFixedFieldIsAlwaysItsWidth guards the divergence the corpus caught:
 // Go's [N]byte accessor answers N zero bytes for a buffer too short to hold
 // the field, so the C++ span accessor has to answer N zero bytes too.

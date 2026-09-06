@@ -4,17 +4,26 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <span>
 #include <vector>
 
 #include <zap/zap.hpp>
 
+#include "transferable_output_zap.hpp"
+#include "transferable_input_zap.hpp"
+
 namespace xvm {
 
 class BaseTx;
+class TransferableOutput;
+class TransferableOutputList;
+class TransferableInput;
+class TransferableInputList;
 
 // Field byte offsets for BaseTx, and the size of its fixed section.
 inline constexpr std::int64_t kBaseTxNetworkIDOff = 0;
@@ -40,8 +49,8 @@ class BaseTx {
         const auto b = o_.bytes_fixed(kBaseTxBlockchainIDOff, 32);
         return b.size() == 32 ? b : std::span<const std::uint8_t>(zero);
     }
-    zap::List Outs() const { return o_.list(kBaseTxOutsOff); }
-    zap::List Ins() const { return o_.list(kBaseTxInsOff); }
+    ::xvm::TransferableOutputList Outs() const;
+    ::xvm::TransferableInputList Ins() const;
     std::span<const std::uint8_t> Memo() const { return o_.bytes(kBaseTxMemoOff); }
 
   private:
@@ -68,25 +77,42 @@ struct BaseTxInput {
 
 // NewBaseTx writes a ZAP-encoded BaseTx message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewBaseTx(const BaseTxInput& in) {
-    zap::Builder b(256, zap::kVersion1);
+    zap::Builder b(256, zap::kVersion2);
+    std::int64_t outs_at = 0;
+    if (!in.Outs.empty()) {
+        auto lb = b.start_list(kTransferableOutputSize);
+        for (const auto& elem : in.Outs) {
+            std::array<std::uint8_t, kTransferableOutputSize> rec{};
+            const std::size_t n = std::min(elem.size(), rec.size());
+            if (n > 0) std::memcpy(rec.data(), elem.data(), n);
+            lb.add_bytes(rec);
+        }
+        outs_at = lb.finish().first;
+    }
+    std::int64_t ins_at = 0;
+    if (!in.Ins.empty()) {
+        auto lb = b.start_list(kTransferableInputSize);
+        for (const auto& elem : in.Ins) {
+            std::array<std::uint8_t, kTransferableInputSize> rec{};
+            const std::size_t n = std::min(elem.size(), rec.size());
+            if (n > 0) std::memcpy(rec.data(), elem.data(), n);
+            lb.add_bytes(rec);
+        }
+        ins_at = lb.finish().first;
+    }
     auto ob = b.start_object(kBaseTxSize);
     ob.set_u32(kBaseTxNetworkIDOff, in.NetworkID);
     ob.set_bytes_fixed(kBaseTxBlockchainIDOff, std::span<const std::uint8_t>(in.BlockchainID));
-    auto outs_list = b.start_list(0);
-    for (const auto& elem : in.Outs) {
-        outs_list.add_u32(static_cast<std::uint32_t>(elem.size()));
-        outs_list.add_bytes(elem);
-    }
-    ob.set_list(kBaseTxOutsOff, outs_list.finish().first, static_cast<std::int64_t>(in.Outs.size()));
-    auto ins_list = b.start_list(0);
-    for (const auto& elem : in.Ins) {
-        ins_list.add_u32(static_cast<std::uint32_t>(elem.size()));
-        ins_list.add_bytes(elem);
-    }
-    ob.set_list(kBaseTxInsOff, ins_list.finish().first, static_cast<std::int64_t>(in.Ins.size()));
+    ob.set_list(kBaseTxOutsOff, outs_at, static_cast<std::int64_t>(in.Outs.size()));
+    ob.set_list(kBaseTxInsOff, ins_at, static_cast<std::int64_t>(in.Ins.size()));
     ob.set_bytes(kBaseTxMemoOff, in.Memo);
     ob.finish_as_root();
     return b.finish();
 }
+
+// The accessors that return another generated class, defined once every
+// class above is complete.
+inline ::xvm::TransferableOutputList BaseTx::Outs() const { return ::xvm::TransferableOutputList(o_.list_stride(kBaseTxOutsOff, kTransferableOutputSize)); }
+inline ::xvm::TransferableInputList BaseTx::Ins() const { return ::xvm::TransferableInputList(o_.list_stride(kBaseTxInsOff, kTransferableInputSize)); }
 
 }  // namespace xvm

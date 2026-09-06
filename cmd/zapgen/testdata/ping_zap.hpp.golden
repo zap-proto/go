@@ -31,6 +31,9 @@ class Ping {
 
     std::uint64_t Seq() const { return o_.u64(kPingSeqOff); }
 
+    // The kPingSize bytes this Ping occupies where it lies.
+    std::span<const std::uint8_t> Record() const { return o_.bytes_fixed(0, kPingSize); }
+
   private:
     zap::Object o_;
 };
@@ -51,7 +54,7 @@ struct PingInput {
 
 // NewPing writes a ZAP-encoded Ping message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewPing(const PingInput& in) {
-    zap::Builder b(256, zap::kVersion1);
+    zap::Builder b(256, zap::kVersion2);
     auto ob = b.start_object(kPingSize);
     ob.set_u64(kPingSeqOff, in.Seq);
     ob.finish_as_root();

@@ -14,6 +14,7 @@
 namespace xvm {
 
 class TransferableOutput;
+class TransferableOutputList;
 
 // Field byte offsets for TransferableOutput, and the size of its fixed section.
 inline constexpr std::int64_t kTransferableOutputOffsetOff = 0;
@@ -31,6 +32,9 @@ class TransferableOutput {
 
     std::uint32_t Offset() const { return o_.u32(kTransferableOutputOffsetOff); }
 
+    // The kTransferableOutputSize bytes this TransferableOutput occupies where it lies.
+    std::span<const std::uint8_t> Record() const { return o_.bytes_fixed(0, kTransferableOutputSize); }
+
   private:
     zap::Object o_;
 };
@@ -43,6 +47,21 @@ inline std::expected<TransferableOutput, zap::Error> WrapTransferableOutput(std:
     return TransferableOutput(m->root());
 }
 
+// TransferableOutputList is a run of TransferableOutput records, kTransferableOutputSize bytes each.
+class TransferableOutputList {
+  public:
+    TransferableOutputList() = default;
+    explicit TransferableOutputList(zap::List l) : l_(l) {}
+
+    // How many elements the list holds.
+    std::int64_t size() const { return l_.size(); }
+    // Element i, or the absent TransferableOutput past the end.
+    ::xvm::TransferableOutput at(std::int64_t i) const { return ::xvm::TransferableOutput(l_.object(i, kTransferableOutputSize)); }
+
+  private:
+    zap::List l_;
+};
+
 // TransferableOutputInput collects the field values for NewTransferableOutput. A borrowed field is a view:
 // it must outlive the call, not the buffer the call returns.
 struct TransferableOutputInput {
@@ -51,7 +70,7 @@ struct TransferableOutputInput {
 
 // NewTransferableOutput writes a ZAP-encoded TransferableOutput message into a fresh buffer and returns it.
 inline std::vector<std::uint8_t> NewTransferableOutput(const TransferableOutputInput& in) {
-    zap::Builder b(256, zap::kVersion1);
+    zap::Builder b(256, zap::kVersion2);
     auto ob = b.start_object(kTransferableOutputSize);
     ob.set_u32(kTransferableOutputOffsetOff, in.Offset);
     ob.finish_as_root();

@@ -40,13 +40,11 @@ import (
 
 // cppBuilderVersion is the wire version the generated C++ builder writes.
 //
-// It is spelled rather than defaulted because the two runtimes default
-// differently: zap.NewBuilder writes version 1, zap::Builder writes version 2.
-// A generated builder that took either default would emit a different header
-// in each language from one schema, and the first thing this backend has to be
-// is byte-for-byte with the Go one. The data segment is identical across
-// versions; only header byte 4 differs.
-const cppBuilderVersion = "zap::kVersion1"
+// It is spelled rather than defaulted because the runtimes default
+// differently. Version 2 is what every Lux message on the wire carries, so it
+// is what every backend stamps; the data segment is identical across
+// versions, and only header byte 4 differs.
+const cppBuilderVersion = "zap::kVersion2"
 
 // EmitCPP emits one header per struct AND one per interface in f, keyed by
 // basename. Mirrors Emit's contract so a caller can pick a backend without
@@ -62,7 +60,8 @@ func EmitCPP(f *File) (map[string][]byte, error) {
 		writeCPPPrologue(&w, f, cppNeeds(one, nil))
 		writeCPPIncludes(&w, f, s)
 		writeCPPOpen(&w, f)
-		writeCPPForwards(&w, one)
+		writeCPPForwards(&w, f, one)
+		emitCPPOffsets(&w, s)
 		emitCPPStruct(&w, f, s)
 		emitCPPOutOfLine(&w, f, one)
 		writeCPPClose(&w, f)
@@ -101,7 +100,14 @@ func EmitCPPSingle(f *File) (string, []byte, error) {
 	var w bytes.Buffer
 	writeCPPPrologue(&w, f, cppNeeds(f.Structs, f.Interfaces))
 	writeCPPOpen(&w, f)
-	writeCPPForwards(&w, f.Structs)
+	writeCPPForwards(&w, f, f.Structs)
+	// Every offset and size first, then the classes. A builder names the
+	// width of a record it holds, and in C++ a name has to be declared before
+	// it is used — a struct declared later in the schema would otherwise be
+	// unusable by one declared earlier.
+	for _, s := range f.Structs {
+		emitCPPOffsets(&w, s)
+	}
 	for _, s := range f.Structs {
 		emitCPPStruct(&w, f, s)
 	}
@@ -134,6 +140,7 @@ type needs struct {
 	fixed   bool // bytes_fixed: <array>
 	text    bool // text: <string_view>
 	bits    bool // f32 / f64: <bit>
+	record  bool // a stride list: <algorithm>, <array>, <cstring>
 }
 
 func cppNeeds(structs []*Struct, ifaces []*Interface) needs {
@@ -149,6 +156,12 @@ func cppNeeds(structs []*Struct, ifaces []*Interface) needs {
 				n.text = true
 			case KindF32, KindF64:
 				n.bits = true
+			case KindList:
+				if f.Type.Stride > 0 {
+					// A record is cut or zero-filled to its width.
+					n.record = true
+					n.fixed = true
+				}
 			}
 		}
 	}
@@ -160,6 +173,9 @@ func writeCPPPrologue(w *bytes.Buffer, f *File, n needs) {
 	fmt.Fprintf(w, "// source: %s\n", sourceName(f))
 	w.WriteString("// SPDX-License-Identifier: BSD-3-Clause-Eco\n\n")
 	w.WriteString("#pragma once\n\n")
+	if n.record {
+		w.WriteString("#include <algorithm>\n")
+	}
 	if n.fixed {
 		w.WriteString("#include <array>\n")
 	}
@@ -167,6 +183,9 @@ func writeCPPPrologue(w *bytes.Buffer, f *File, n needs) {
 		w.WriteString("#include <bit>\n")
 	}
 	w.WriteString("#include <cstdint>\n")
+	if n.record {
+		w.WriteString("#include <cstring>\n")
+	}
 	w.WriteString("#include <expected>\n")
 	w.WriteString("#include <span>\n")
 	if n.rpc {
@@ -188,10 +207,18 @@ func writeCPPPrologue(w *bytes.Buffer, f *File, n needs) {
 func writeCPPIncludes(w *bytes.Buffer, f *File, s *Struct) {
 	seen := map[string]bool{s.Name: true}
 	var names []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
 	for _, fd := range s.Fields {
-		if fd.Type.Kind == KindStruct && !seen[fd.Type.StructName] {
-			seen[fd.Type.StructName] = true
-			names = append(names, fd.Type.StructName)
+		if fd.Type.Kind == KindStruct {
+			add(fd.Type.StructName)
+		}
+		if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
+			add(fd.Type.ListElem.StructName)
 		}
 	}
 	if len(names) == 0 {
@@ -217,7 +244,7 @@ func writeCPPClose(w *bytes.Buffer, f *File) {
 // declaration is enough to declare them, and by the time they are defined
 // every class is complete. Declaration order in the schema then carries no
 // meaning, and a cycle between two structs is expressible.
-func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
+func writeCPPForwards(w *bytes.Buffer, f *File, structs []*Struct) {
 	seen := map[string]bool{}
 	var names []string
 	add := func(name string) {
@@ -230,19 +257,27 @@ func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
 		add(s.Name)
 	}
 	// Also every class this file NAMES: a per-struct file declares its
-	// nested types here and includes their headers for the definitions.
+	// nested and element types here and includes their headers for the
+	// definitions.
 	for _, s := range structs {
-		for _, f := range s.Fields {
-			if f.Type.Kind == KindStruct {
-				add(f.Type.StructName)
+		for _, fd := range s.Fields {
+			if fd.Type.Kind == KindStruct {
+				add(fd.Type.StructName)
+			}
+			if fd.Type.Kind == KindList && fd.Type.ListElem.Kind == KindStruct {
+				add(fd.Type.ListElem.StructName)
 			}
 		}
 	}
 	if len(names) == 0 {
 		return
 	}
+	held := elements(f)
 	for _, name := range names {
 		fmt.Fprintf(w, "class %s;\n", name)
+		if held[name] {
+			fmt.Fprintf(w, "class %sList;\n", name)
+		}
 	}
 	w.WriteString("\n")
 }
@@ -250,10 +285,41 @@ func writeCPPForwards(w *bytes.Buffer, structs []*Struct) {
 // --- structs ----------------------------------------------------------------
 
 func emitCPPStruct(w *bytes.Buffer, f *File, s *Struct) {
-	emitCPPOffsets(w, s)
 	emitCPPReader(w, f, s)
+	emitCPPList(w, f, s)
 	emitCPPBuilder(w, s)
 	w.WriteString("\n")
+}
+
+// emitCPPList writes the typed list a field of s's element type answers,
+// beside the struct it holds. It is what retires `list.object(i, SIZE)` from
+// every caller: the width is stated once, by the generator that knows it.
+func emitCPPList(w *bytes.Buffer, f *File, s *Struct) {
+	if !elements(f)[s.Name] {
+		return
+	}
+	if inline(s) {
+		fmt.Fprintf(w, "// %sList is a run of %s records, %s bytes each.\n", s.Name, s.Name, cppSizeName(s))
+	} else {
+		fmt.Fprintf(w, "// %sList is a run of %s entries, each behind its length.\n", s.Name, s.Name)
+	}
+	fmt.Fprintf(w, "class %sList {\n", s.Name)
+	w.WriteString("  public:\n")
+	fmt.Fprintf(w, "    %sList() = default;\n", s.Name)
+	fmt.Fprintf(w, "    explicit %sList(zap::List l) : l_(l) {}\n\n", s.Name)
+	w.WriteString("    // How many elements the list holds.\n")
+	w.WriteString("    std::int64_t size() const { return l_.size(); }\n")
+	fmt.Fprintf(w, "    // Element i, or the absent %s past the end.\n", s.Name)
+	if inline(s) {
+		fmt.Fprintf(w, "    %s at(std::int64_t i) const { return %s(l_.object(i, %s)); }\n",
+			cppTypeName(f, s.Name), cppTypeName(f, s.Name), cppSizeName(s))
+	} else {
+		fmt.Fprintf(w, "    %s at(std::int64_t i) const { return %s(l_.object_at(i)); }\n",
+			cppTypeName(f, s.Name), cppTypeName(f, s.Name))
+	}
+	w.WriteString("\n  private:\n")
+	w.WriteString("    zap::List l_;\n")
+	w.WriteString("};\n\n")
 }
 
 // cppTypeName qualifies a generated class with its namespace. A field may
@@ -287,6 +353,13 @@ func emitCPPReader(w *bytes.Buffer, f *File, s *Struct) {
 	w.WriteString("    zap::Object object() const { return o_; }\n\n")
 	for _, fd := range s.Fields {
 		emitCPPFieldReader(w, f, s, fd)
+	}
+	if inline(s) {
+		// A record is entirely its own bytes, so it can answer them: what a
+		// list element holds, and what writing one back needs.
+		fmt.Fprintf(w, "\n    // The %s bytes this %s occupies where it lies.\n", cppSizeName(s), s.Name)
+		fmt.Fprintf(w, "    std::span<const std::uint8_t> Record() const { return o_.bytes_fixed(0, %s); }\n",
+			cppSizeName(s))
 	}
 	w.WriteString("\n  private:\n")
 	w.WriteString("    zap::Object o_;\n")
@@ -342,7 +415,15 @@ func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 		fmt.Fprintf(w, "        return b.size() == %d ? b : std::span<const std::uint8_t>(zero);\n", f.Type.FixedSize)
 		w.WriteString("    }\n")
 	case KindList:
-		fmt.Fprintf(w, "    zap::List %s() const { return o_.list(%s); }\n", f.Name, off)
+		elem := f.Type.ListElem
+		if elem.Kind == KindStruct {
+			// A typed element accessor: the list answers its own element
+			// type. Declared here, defined out of line once every class
+			// exists, for the reason a nested accessor is.
+			fmt.Fprintf(w, "    %sList %s() const;\n", cppTypeName(file, elem.StructName), f.Name)
+			return
+		}
+		fmt.Fprintf(w, "    zap::List %s() const { return %s; }\n", f.Name, cppListRead(off, f.Type))
 	case KindStruct:
 		// Declared here, defined by emitCPPOutOfLine once every class exists.
 		fmt.Fprintf(w, "    %s %s() const;\n", cppTypeName(file, f.Type.StructName), f.Name)
@@ -354,18 +435,27 @@ func emitCPPFieldReader(w *bytes.Buffer, file *File, s *Struct, f *Field) {
 // is complete, so schema declaration order does not constrain the header.
 func emitCPPOutOfLine(w *bytes.Buffer, file *File, structs []*Struct) {
 	first := true
+	open := func() {
+		if first {
+			w.WriteString("// The accessors that return another generated class, defined once every\n")
+			w.WriteString("// class above is complete.\n")
+			first = false
+		}
+	}
 	for _, s := range structs {
 		for _, f := range s.Fields {
-			if f.Type.Kind != KindStruct {
-				continue
+			switch {
+			case f.Type.Kind == KindStruct:
+				open()
+				name := cppTypeName(file, f.Type.StructName)
+				fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
+					name, s.Name, f.Name, name, cppOffsetName(s, f))
+			case f.Type.Kind == KindList && f.Type.ListElem.Kind == KindStruct:
+				open()
+				name := cppTypeName(file, f.Type.ListElem.StructName) + "List"
+				fmt.Fprintf(w, "inline %s %s::%s() const { return %s(%s); }\n",
+					name, s.Name, f.Name, name, cppListRead(cppOffsetName(s, f), f.Type))
 			}
-			if first {
-				w.WriteString("// Nested-struct accessors, defined once every class above is complete.\n")
-				first = false
-			}
-			name := cppTypeName(file, f.Type.StructName)
-			fmt.Fprintf(w, "inline %s %s::%s() const { return %s(o_.object(%s)); }\n",
-				name, s.Name, f.Name, name, cppOffsetName(s, f))
 		}
 	}
 	if !first {
@@ -385,6 +475,11 @@ func emitCPPBuilder(w *bytes.Buffer, s *Struct) {
 	fmt.Fprintf(w, "// New%s writes a ZAP-encoded %s message into a fresh buffer and returns it.\n", s.Name, s.Name)
 	fmt.Fprintf(w, "inline std::vector<std::uint8_t> New%s(const %sInput& in) {\n", s.Name, s.Name)
 	fmt.Fprintf(w, "    zap::Builder b(256, %s);\n", cppBuilderVersion)
+	// What a pointer will name goes down first, in field order; the object
+	// last. That is the order the P, X and Q wires are already written in.
+	for _, f := range s.Fields {
+		emitCPPTail(w, s, f)
+	}
 	fmt.Fprintf(w, "    auto ob = b.start_object(%s);\n", cppSizeName(s))
 	for _, f := range s.Fields {
 		emitCPPFieldWriter(w, s, f)
@@ -470,26 +565,81 @@ func emitCPPFieldWriter(w *bytes.Buffer, s *Struct, f *Field) {
 	case KindBytesFixed:
 		fmt.Fprintf(w, "    ob.set_bytes_fixed(%s, std::span<const std::uint8_t>(in.%s));\n", off, f.Name)
 	case KindList:
-		// One entry per element: a 4-byte little-endian length, then the
-		// payload. Both halves are runtime writes — add_u32 lays the length
-		// word, add_bytes the payload — and the element COUNT set_list carries
-		// is the caller's, not the byte count add_bytes accumulated. Same
-		// bytes, same count word, as the Go backend's AddObjectBytes.
-		v := lowerFirst(f.Name) + "_list"
-		fmt.Fprintf(w, "    auto %s = b.start_list(0);\n", v)
-		fmt.Fprintf(w, "    for (const auto& elem : in.%s) {\n", f.Name)
-		fmt.Fprintf(w, "        %s.add_u32(static_cast<std::uint32_t>(elem.size()));\n", v)
-		fmt.Fprintf(w, "        %s.add_bytes(elem);\n", v)
-		w.WriteString("    }\n")
-		fmt.Fprintf(w, "    ob.set_list(%s, %s.finish().first, static_cast<std::int64_t>(in.%s.size()));\n",
-			off, v, f.Name)
+		fmt.Fprintf(w, "    ob.set_list(%s, %s, static_cast<std::int64_t>(in.%s.size()));\n",
+			off, cppAt(f), f.Name)
 	case KindStruct:
-		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
-		fmt.Fprintf(w, "        auto nested = b.start_object(static_cast<std::int64_t>(in.%s.size()));\n", f.Name)
-		fmt.Fprintf(w, "        nested.set_bytes_fixed(0, in.%s);\n", f.Name)
-		fmt.Fprintf(w, "        ob.set_object(%s, nested.finish());\n", off)
-		w.WriteString("    }\n")
+		fmt.Fprintf(w, "    ob.set_object(%s, %s);\n", off, cppAt(f))
 	}
+}
+
+// cppListRead is the read a list field answers: the tight one when the schema
+// states how wide an element is, the plain one when it does not.
+func cppListRead(off string, t Type) string {
+	if t.Stride > 0 {
+		return fmt.Sprintf("o_.list_stride(%s, %s)", off, cppStride(t))
+	}
+	return fmt.Sprintf("o_.list(%s)", off)
+}
+
+// cppStride is how the width of one element is spelled: the element struct's
+// own kSize, so the number lives in one place, or the literal width of a
+// value that has no struct to hold it.
+func cppStride(t Type) string {
+	if t.ListElem.Kind == KindStruct {
+		return "k" + t.ListElem.StructName + "Size"
+	}
+	return fmt.Sprint(t.Stride)
+}
+
+// cppAt names the local holding where a field's pointer target landed.
+func cppAt(f *Field) string { return lowerFirst(f.Name) + "_at" }
+
+// emitCPPTail writes what a pointer field will name, ahead of the object that
+// names it — the order the chains write, so the object's pointer leads
+// backward into bytes already down.
+func emitCPPTail(w *bytes.Buffer, s *Struct, f *Field) {
+	at := cppAt(f)
+	switch f.Type.Kind {
+	case KindList:
+		fmt.Fprintf(w, "    std::int64_t %s = 0;\n", at)
+		fmt.Fprintf(w, "    if (!in.%s.empty()) {\n", f.Name)
+		fmt.Fprintf(w, "        auto lb = b.start_list(%s);\n", cppStrideOrZero(f.Type))
+		fmt.Fprintf(w, "        for (const auto& elem : in.%s) {\n", f.Name)
+		if f.Type.Stride > 0 {
+			// A record is exactly as wide as the schema says, whatever the
+			// caller handed over: short is zero-filled, long is cut. A list
+			// whose elements were each a different width is not a list. The
+			// element COUNT set_list carries is the caller's, not the byte
+			// count add_bytes accumulated.
+			fmt.Fprintf(w, "            std::array<std::uint8_t, %s> rec{};\n", cppStride(f.Type))
+			fmt.Fprintf(w, "            const std::size_t n = std::min(elem.size(), rec.size());\n")
+			w.WriteString("            if (n > 0) std::memcpy(rec.data(), elem.data(), n);\n")
+			w.WriteString("            lb.add_bytes(rec);\n")
+		} else {
+			// One entry per element: a 4-byte little-endian length, then the
+			// payload. add_u32 lays the length word, add_bytes the payload.
+			w.WriteString("            lb.add_u32(static_cast<std::uint32_t>(elem.size()));\n")
+			w.WriteString("            lb.add_bytes(elem);\n")
+		}
+		w.WriteString("        }\n")
+		fmt.Fprintf(w, "        %s = lb.finish().first;\n", at)
+		w.WriteString("    }\n")
+	case KindStruct:
+		// embed copies the message the caller built and answers where its
+		// ROOT landed. A pointer to the head of the copy would name the
+		// copy's header, and a reader would answer "ZAP" where the first
+		// field belongs.
+		fmt.Fprintf(w, "    const std::int64_t %s = b.embed(in.%s);\n", at, f.Name)
+	}
+}
+
+// cppStrideOrZero is cppStride, or "0" for a list whose elements have no
+// width the schema states.
+func cppStrideOrZero(t Type) string {
+	if t.Stride == 0 {
+		return "0"
+	}
+	return cppStride(t)
 }
 
 // --- services ---------------------------------------------------------------
