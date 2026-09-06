@@ -14,3 +14,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# The Rust half of the cross-language proof builds here.
+/conformance/rust/target/

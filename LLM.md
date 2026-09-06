@@ -49,11 +49,66 @@ runtimes implementing that spec.
 
 `github.com/zap-proto/go/cmd/zapgen` — shipped and tested. It parses
 `.zap` schemas (brace + whitespace forms, one parser via `desugar.go`)
-and emits Go: per-struct View/Builder, and per-`interface` a typed RPC
-client + abstract dispatch server + 1-based ordinal table over the `rpc`
-envelope. Drop a `//go:generate zapgen schema.zap` line in the consuming
-package; `examples/echo` is a worked end-to-end demo (generated code +
-in-memory client/server round-trip test).
+and emits, per struct, a zero-copy View and a Builder, and per
+`interface`, a typed RPC client + abstract dispatch server + 1-based
+ordinal table over the `rpc` envelope. Drop a `//go:generate zapgen
+schema.zap` line in the consuming package; `examples/echo` is a worked
+end-to-end demo (generated code + in-memory client/server round-trip
+test).
+
+### One front end, two backends
+
+`-lang go` (the default) and `-lang rust`. The parser, the desugar and
+the schema model are shared; only the emitter differs — `emit.go` and
+`emit_rust.go`. A backend that grew its own parser would be the thing
+this generator exists to remove, and `TestOneFrontEnd` says so.
+
+Rust compiles by module, not by directory, so a schema emits ONE
+`<schema>_zap.rs` (there is no per-struct form; `-single` is implied),
+plus the runtime it calls: `zap.rs`, and `rpc.rs` when the schema
+declares an interface. Those two are the only hand-maintained Rust in
+the toolchain; they live in `cmd/zapgen/rust/`, are embedded in the
+binary, and are written out verbatim beside the module. Fix a runtime
+bug there and every Rust consumer gets it at once.
+
+```bash
+zapgen -lang rust -out ./src schema.zap        # module + runtime
+zapgen -lang rust -rust-runtime crate::wire … # runtime filed elsewhere
+```
+
+The emitted Rust reads by borrowing: `Foo<'a>` wraps a `zap::Object<'a>`,
+a field is a bounds-checked look at bytes already in hand, and
+`bytes`/`text`/`bytes_fixed` answer `&'a [u8]` / `&'a str` / `&'a [u8; N]`
+into the caller's buffer. Nothing is decoded into an owned struct and
+there is no encoder, decoder or codec: the builder writes into one
+buffer and hands it over. Offsets and a from-object constructor are
+`pub`, so a list element can be read as a typed view from outside the
+generated module — the Go backend keeps both unexported, which is the
+one asymmetry between them.
+
+### The proof that the two backends agree
+
+`conformance/` — not a unit test, a differential. Both backends are
+generated from the same schemas; the Go program and its Rust twin read
+the same corpus, run the same fields through the emitted code, and write
+the same report. The report is compared byte for byte.
+
+```bash
+sh conformance/run.sh
+```
+
+The corpus is `conformance/corpus/vectors.tsv`, a verbatim copy of
+node2's `conformance/corpus/vectors.tsv`: 208 P-chain and X-chain
+vectors written by the Go node. 127 parse, 77 are refused (every one a
+deliberate truncation or edge case), 4 carry no wire bytes. Each parsed
+vector is read field by field, written back out through the emitted
+builder, and read again. `conformance/schema/` states the P and X wire
+as schemas — offsets taken from node2's hand-written Rust — and the
+emitted sizes come out equal to the strides that code states by hand
+(Out 72, In 96, Addr 20, Sig 4, Spend 77, P block 73, X block 96).
+
+`conformance/schema/kitchen.zap` carries every type the dialect has, so
+the build side is exercised beyond the handful a chain happens to use.
 
 ### Schema syntax — two equivalent forms, one parser
 
@@ -159,7 +214,11 @@ schema.go      Type, Struct, Field, Schema, StructBuilder — reflection
 rpc/           Call envelope (BuildRequest/ParseRequest/Build/ParseResponse)
                + promise pipelining (Session, Pipeliner) — pipeline.go
 cap/           Capability runtime: Issue/Attenuate/Verify/VerifyChain/Revoke
-cmd/zapgen/    Schema compiler: parser + desugar + struct & interface emit
+cmd/zapgen/    Schema compiler: one front end (parser + desugar), a
+               backend per language (emit.go, emit_rust.go), and the
+               Rust runtime it emits verbatim (rust/zap.rs, rust/rpc.rs)
+conformance/   The cross-language proof: same schemas, same corpus, one
+               report, compared byte for byte (run.sh)
 *_test.go      Unit tests, fuzzers, benchmarks
 examples/      Self-contained demos (agents mesh; echo RPC service)
 ```
@@ -169,9 +228,11 @@ examples/      Self-contained demos (agents mesh; echo RPC service)
 ```bash
 go build ./...
 go test ./...
+sh conformance/run.sh   # the Go and Rust backends must agree, byte for byte
 ```
 
-Both must pass clean — no skipped tests, no expected failures.
+All three must pass clean — no skipped tests, no expected failures. The
+proof needs a Rust toolchain; nothing else in the repo does.
 
 ## Runtime consolidation with luxfi/zap
 
