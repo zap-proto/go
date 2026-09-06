@@ -36,8 +36,14 @@ func (t BaseTx) BlockchainID() [32]byte {
 	return out
 }
 func (t BaseTx) Outs() zap.List { return t.o.ListStride(baseTxOutsOff, 4) }
-func (t BaseTx) Ins() zap.List  { return t.o.ListStride(baseTxInsOff, 4) }
-func (t BaseTx) Memo() []byte   { return t.o.Bytes(baseTxMemoOff) }
+
+// OutsAt returns element i of Outs. Out of range returns the zero view.
+func (t BaseTx) OutsAt(i int) TransferableOutput { return TransferableOutput{o: t.Outs().ObjectAt(i)} }
+func (t BaseTx) Ins() zap.List                   { return t.o.ListStride(baseTxInsOff, 4) }
+
+// InsAt returns element i of Ins. Out of range returns the zero view.
+func (t BaseTx) InsAt(i int) TransferableInput { return TransferableInput{o: t.Ins().ObjectAt(i)} }
+func (t BaseTx) Memo() []byte                  { return t.o.Bytes(baseTxMemoOff) }
 
 // BaseTxInput collects the field values for NewBaseTx.
 type BaseTxInput struct {

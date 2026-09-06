@@ -199,7 +199,58 @@ func (p *parser) parseFile() (*File, error) {
 			return nil, p.errf("expected `struct`, `interface`, or `type` at top level")
 		}
 	}
+	if err := p.file.resolve(); err != nil {
+		return nil, fmt.Errorf("%s: %w", p.filename, err)
+	}
 	return p.file, nil
+}
+
+// resolve refuses a schema that names a struct it does not declare.
+//
+// A backend turns `list<ptr<Leaf>>` into a typed accessor that RETURNS a
+// Leaf, so an unresolved name reaches the emitted source as a type that is
+// not there — a dangling reference discovered by the target language's
+// compiler, in generated code nobody edits, pointing at a line the author
+// never wrote. One schema is one closed set of names; something declared
+// elsewhere is not in it, and saying so here is the difference between an
+// error about the schema and an error about its output.
+func (f *File) resolve() error {
+	declared := make(map[string]bool, len(f.Structs))
+	for _, s := range f.Structs {
+		declared[s.Name] = true
+	}
+	var check func(where string, t Type) error
+	check = func(where string, t Type) error {
+		switch t.Kind {
+		case KindStruct, KindPtr:
+			if !declared[t.StructName] {
+				return fmt.Errorf("%s names %s, which this schema does not declare", where, t.StructName)
+			}
+		case KindList:
+			if t.ListElem != nil {
+				return check(where, *t.ListElem)
+			}
+		}
+		return nil
+	}
+	for _, s := range f.Structs {
+		for _, fld := range s.Fields {
+			if err := check(fmt.Sprintf("%s.%s", s.Name, fld.Name), fld.Type); err != nil {
+				return err
+			}
+		}
+	}
+	for _, iface := range f.Interfaces {
+		for _, m := range iface.Methods {
+			for _, prm := range []*Param{m.Request, m.Response} {
+				if prm != nil && !declared[prm.StructName] {
+					return fmt.Errorf("%s.%s names %s, which this schema does not declare",
+						iface.Name, m.Name, prm.StructName)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // parseAlias :=  'type' Ident '=' Type

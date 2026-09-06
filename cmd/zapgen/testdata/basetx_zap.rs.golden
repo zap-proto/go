@@ -61,8 +61,18 @@ impl<'a> BaseTx<'a> {
         self.o.list_stride(BASE_TX_OUTS, 4)
     }
 
+    /// Element `i` of `outs`. Out of range answers the zero view.
+    pub fn outs_at(&self, i: usize) -> TransferableOutput<'a> {
+        TransferableOutput::new(self.outs().object_at(i))
+    }
+
     pub fn ins(&self) -> zap::List<'a> {
         self.o.list_stride(BASE_TX_INS, 4)
+    }
+
+    /// Element `i` of `ins`. Out of range answers the zero view.
+    pub fn ins_at(&self, i: usize) -> TransferableInput<'a> {
+        TransferableInput::new(self.ins().object_at(i))
     }
 
     pub fn memo(&self) -> &'a [u8] {
@@ -121,6 +131,186 @@ pub fn put_base_tx(b: &mut zap::Builder, input: &BaseTxInput<'_>) -> usize {
 pub fn new_base_tx(input: &BaseTxInput<'_>) -> Vec<u8> {
     let mut b = zap::Builder::new_v2(256);
     let at = put_base_tx(&mut b, input);
+    b.set_root(at);
+    b.finish()
+}
+
+// TransferableOutput — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_OUTPUT_ASSET: usize = 0;
+pub const TRANSFERABLE_OUTPUT_OUTPUT: usize = 32;
+pub const TRANSFERABLE_OUTPUT_SIZE: usize = 40;
+
+/// A view of a ZAP-encoded TransferableOutput. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableOutput<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> TransferableOutput<'a> {
+    /// Take `data` as a TransferableOutput message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(TransferableOutput {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        TransferableOutput { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    /// The 32 inline bytes at `TRANSFERABLE_OUTPUT_ASSET`; zeros if the span runs off the buffer.
+    pub fn asset(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_OUTPUT_ASSET, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn output(&self) -> &'a [u8] {
+        self.o.bytes(TRANSFERABLE_OUTPUT_OUTPUT)
+    }
+}
+
+/// The field values [`new_transferable_output`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableOutputInput<'a> {
+    pub asset: &'a [u8; 32],
+    pub output: &'a [u8],
+}
+
+impl<'a> Default for TransferableOutputInput<'a> {
+    fn default() -> Self {
+        TransferableOutputInput {
+            asset: &[0u8; 32],
+            output: &[],
+        }
+    }
+}
+
+/// Write a TransferableOutput into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_transferable_output(b: &mut zap::Builder, input: &TransferableOutputInput<'_>) -> usize {
+    let mut ob = b.start_object(TRANSFERABLE_OUTPUT_SIZE);
+    ob.set_bytes_fixed(b, TRANSFERABLE_OUTPUT_ASSET, input.asset);
+    ob.set_bytes(b, TRANSFERABLE_OUTPUT_OUTPUT, input.output);
+    ob.finish(b)
+}
+
+/// Write a TransferableOutput message and answer its bytes.
+pub fn new_transferable_output(input: &TransferableOutputInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_transferable_output(&mut b, input);
+    b.set_root(at);
+    b.finish()
+}
+
+// TransferableInput — field offsets, in bytes, and the fixed section's size.
+pub const TRANSFERABLE_INPUT_TX_ID: usize = 0;
+pub const TRANSFERABLE_INPUT_INDEX: usize = 32;
+pub const TRANSFERABLE_INPUT_ASSET: usize = 36;
+pub const TRANSFERABLE_INPUT_INPUT: usize = 68;
+pub const TRANSFERABLE_INPUT_SIZE: usize = 76;
+
+/// A view of a ZAP-encoded TransferableInput. Reading a field costs a bounds check.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInput<'a> {
+    o: zap::Object<'a>,
+}
+
+impl<'a> TransferableInput<'a> {
+    /// Take `data` as a TransferableInput message. Fails only on the wire-level
+    /// checks — magic, version, declared size.
+    pub fn wrap(data: &'a [u8]) -> Result<Self, zap::Error> {
+        Ok(TransferableInput {
+            o: zap::Message::parse(data)?.root(),
+        })
+    }
+
+    /// A view of an object already located in a message — a nested
+    /// field, or one element of a list.
+    pub fn new(o: zap::Object<'a>) -> Self {
+        TransferableInput { o }
+    }
+
+    /// The object this view reads.
+    pub fn object(&self) -> zap::Object<'a> {
+        self.o
+    }
+
+    /// The 32 inline bytes at `TRANSFERABLE_INPUT_TX_ID`; zeros if the span runs off the buffer.
+    pub fn tx_id(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_INPUT_TX_ID, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn index(&self) -> u32 {
+        self.o.u32(TRANSFERABLE_INPUT_INDEX)
+    }
+
+    /// The 32 inline bytes at `TRANSFERABLE_INPUT_ASSET`; zeros if the span runs off the buffer.
+    pub fn asset(&self) -> &'a [u8; 32] {
+        self.o
+            .bytes_fixed(TRANSFERABLE_INPUT_ASSET, 32)
+            .try_into()
+            .unwrap_or(&[0u8; 32])
+    }
+
+    pub fn input(&self) -> &'a [u8] {
+        self.o.bytes(TRANSFERABLE_INPUT_INPUT)
+    }
+}
+
+/// The field values [`new_transferable_input`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferableInputInput<'a> {
+    pub tx_id: &'a [u8; 32],
+    pub index: u32,
+    pub asset: &'a [u8; 32],
+    pub input: &'a [u8],
+}
+
+impl<'a> Default for TransferableInputInput<'a> {
+    fn default() -> Self {
+        TransferableInputInput {
+            tx_id: &[0u8; 32],
+            index: 0,
+            asset: &[0u8; 32],
+            input: &[],
+        }
+    }
+}
+
+/// Write a TransferableInput into `b` and answer where its object landed.
+///
+/// What a field points AT is written first, in field order, and the
+/// fixed section last: a pointer always leads backward, to bytes
+/// already placed.
+pub fn put_transferable_input(b: &mut zap::Builder, input: &TransferableInputInput<'_>) -> usize {
+    let mut ob = b.start_object(TRANSFERABLE_INPUT_SIZE);
+    ob.set_bytes_fixed(b, TRANSFERABLE_INPUT_TX_ID, input.tx_id);
+    ob.set_u32(b, TRANSFERABLE_INPUT_INDEX, input.index);
+    ob.set_bytes_fixed(b, TRANSFERABLE_INPUT_ASSET, input.asset);
+    ob.set_bytes(b, TRANSFERABLE_INPUT_INPUT, input.input);
+    ob.finish(b)
+}
+
+/// Write a TransferableInput message and answer its bytes.
+pub fn new_transferable_input(input: &TransferableInputInput<'_>) -> Vec<u8> {
+    let mut b = zap::Builder::new_v2(256);
+    let at = put_transferable_input(&mut b, input);
     b.set_root(at);
     b.finish()
 }

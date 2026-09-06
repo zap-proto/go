@@ -179,3 +179,53 @@ struct B {
 		t.Fatalf("two structs naming one field each were refused: %v", err)
 	}
 }
+
+// TestAStructNamedButNotDeclaredIsRefused — one schema is one closed set of
+// names. A field whose type lives in some other file reaches the emitted
+// source as a dangling type, and the author hears about it from rustc,
+// pointing at generated code nobody wrote.
+//
+// Found trying to lift the fx primitives out of the X-chain schema: the
+// X-chain's own envelope holds `list<ptr<TransferableOut>>`, so moving that
+// struct away left the reference behind, and the generator emitted it anyway.
+func TestAStructNamedButNotDeclaredIsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, field string }{
+		{"nested", "Leaf Leaf @0"},
+		{"pointer", "Leaf ptr<Leaf> @0"},
+		{"list of pointers", "Leaves list<ptr<Leaf>> @0"},
+		{"list of structs", "Leaves list<Leaf> @0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package p\n\nstruct Holder {\n    " + tc.field + "\n}\n"
+			_, err := Parse("holder.zap", []byte(src))
+			if err == nil {
+				t.Fatal("a field naming an undeclared struct was accepted")
+			}
+			if !strings.Contains(err.Error(), "which this schema does not declare") {
+				t.Errorf("error does not say what is wrong: %v", err)
+			}
+			if !strings.Contains(err.Error(), "Leaf") {
+				t.Errorf("error does not name the missing struct: %v", err)
+			}
+		})
+	}
+}
+
+// TestAStructMayBeNamedBeforeItIsDeclared — the check is over the whole file,
+// not the prefix parsed so far. A schema reads top to bottom and its structs
+// do not have to.
+func TestAStructMayBeNamedBeforeItIsDeclared(t *testing.T) {
+	const src = `package p
+
+struct Holder {
+    Leaves list<ptr<Leaf>> @0
+}
+
+struct Leaf {
+    Tag u32 @0
+}
+`
+	if _, err := Parse("holder.zap", []byte(src)); err != nil {
+		t.Fatalf("a forward reference inside one schema was refused: %v", err)
+	}
+}

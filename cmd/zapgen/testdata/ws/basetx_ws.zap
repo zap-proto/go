@@ -13,3 +13,14 @@ struct BaseTx
     Outs         list<TransferableOutput>
     Ins          list<TransferableInput>
     Memo         bytes
+
+# The two the envelope points at.
+struct TransferableOutput
+    Asset  id32
+    Output bytes
+
+struct TransferableInput
+    TxID   id32
+    Index  u32
+    Asset  id32
+    Input  bytes
