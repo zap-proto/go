@@ -13,9 +13,12 @@ Import path: `github.com/zap-proto/go`. Package name: `zap`.
 Three sibling packages ship alongside the root codec:
 
 - `cmd/zapgen` — the schema compiler. Emits per-struct zero-copy
-  View/Builder Go AND, for every `interface` declaration, a typed RPC
+  View/Builder code AND, for every `interface` declaration, a typed RPC
   client + an abstract ordinal-dispatch server contract + a 1-based
   method-ordinal table. Brace and whitespace-significant DSL, one parser.
+  `-lang go` (default) emits Go against this runtime; `-lang cpp` emits
+  headers against `github.com/zap-proto/cpp`. One front end, one schema
+  model, one emitter per language.
 - `rpc` — the ZAP call envelope (`BuildRequest`/`ParseRequest`,
   `BuildResponse`/`ParseResponse`, `Call`, `Response`, status codes). The
   wire contract the generated client/server ride; byte-compatible with the
@@ -56,12 +59,28 @@ schema.zap` line in the consuming package; `examples/echo` is a worked
 end-to-end demo (generated code + in-memory client/server round-trip
 test).
 
-### One front end, two backends
+### The read side is total
 
-`-lang go` (the default) and `-lang rust`. The parser, the desugar and
-the schema model are shared; only the emitter differs — `emit.go` and
-`emit_rust.go`. A backend that grew its own parser would be the thing
-this generator exists to remove, and `TestOneFrontEnd` says so.
+An out-of-range read answers zero rather than faulting, which is what lets a
+hostile buffer go straight to a typed accessor with no validation pass in
+front of it. That has to hold for the absent `Object` too — a null pointer
+field resolves to it, and a generated accessor returns it BY VALUE, so a
+caller has no way to test for it before reading. `Object.buf()` in `zap.go`
+is where that is true; before it, exactly the case a hostile or truncated
+buffer steers a reader to was the one that panicked.
+
+### One front end, three backends
+
+`-lang go` (the default), `-lang rust`, `-lang cpp`. The parser, the desugar
+and the schema model are shared; only the emitter differs — `emit.go`,
+`emit_rust.go`, `emitcpp.go`. A backend that grew its own parser would be the
+thing this generator exists to remove, and `TestOneFrontEnd` says so.
+
+| `-lang` | output | runtime it calls |
+|---------|--------|------------------|
+| `go`    | `<struct>_zap.go`  | `github.com/zap-proto/go` |
+| `rust`  | `<schema>_zap.rs`  | `zap.rs`, written beside it |
+| `cpp`   | `<struct>_zap.hpp` | `github.com/zap-proto/cpp` |
 
 Rust compiles by module, not by directory, so a schema emits ONE
 `<schema>_zap.rs` (there is no per-struct form; `-single` is implied),
@@ -86,12 +105,26 @@ buffer and hands it over. Offsets and a from-object constructor are
 generated module — the Go backend keeps both unexported, which is the
 one asymmetry between them.
 
-### The proof that the two backends agree
+Two places the C++ emitter differs because C++ does:
 
-`conformance/` — not a unit test, a differential. Both backends are
-generated from the same schemas; the Go program and its Rust twin read
-the same corpus, run the same fields through the emitted code, and write
-the same report. The report is compared byte for byte.
+- A nested-struct accessor is written under its qualified name
+  (`::pkg::Child`), because a field may carry the name of its own type and the
+  member would otherwise shadow the class. Go has no such collision.
+- Two structs that point at each other need `-single`. Per-struct headers
+  cannot both be complete for the other, so the cycle is expressible in one
+  header and not in two. Go compiles either.
+
+And one thing every backend spells rather than defaults: **a
+`bytes_fixed[N]` field is always N bytes.** Go's `[N]byte` answers N zeros
+for a buffer too short to hold it, so the C++ span accessor answers a zero
+span of length N rather than an empty one.
+
+### The proof that the backends agree
+
+`conformance/` — not a unit test, a differential. Every backend is
+generated from the same schemas; the Go program and its Rust and C++ twins
+read the same corpus, run the same fields through the emitted code, and
+write the same report. The reports are compared byte for byte.
 
 ```bash
 sh conformance/run.sh
@@ -215,8 +248,9 @@ rpc/           Call envelope (BuildRequest/ParseRequest/Build/ParseResponse)
                + promise pipelining (Session, Pipeliner) — pipeline.go
 cap/           Capability runtime: Issue/Attenuate/Verify/VerifyChain/Revoke
 cmd/zapgen/    Schema compiler: one front end (parser + desugar), a
-               backend per language (emit.go, emit_rust.go), and the
-               Rust runtime it emits verbatim (rust/zap.rs, rust/rpc.rs)
+               backend per language (emit.go, emit_rust.go, emitcpp.go),
+               and the Rust runtime it emits verbatim (rust/zap.rs,
+               rust/rpc.rs)
 conformance/   The cross-language proof: same schemas, same corpus, one
                report, compared byte for byte (run.sh)
 *_test.go      Unit tests, fuzzers, benchmarks
@@ -228,11 +262,12 @@ examples/      Self-contained demos (agents mesh; echo RPC service)
 ```bash
 go build ./...
 go test ./...
-sh conformance/run.sh   # the Go and Rust backends must agree, byte for byte
+sh conformance/run.sh   # every backend must agree, byte for byte
 ```
 
 All three must pass clean — no skipped tests, no expected failures. The
-proof needs a Rust toolchain; nothing else in the repo does.
+proof needs a Rust toolchain and a C++23 compiler; nothing else in the
+repo does.
 
 ## Runtime consolidation with luxfi/zap
 
