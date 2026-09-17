@@ -1,6 +1,6 @@
 module github.com/zap-proto/go
 
-go 1.26.5
+go 1.27.1
 
 require github.com/quic-go/quic-go v0.59.1
 
